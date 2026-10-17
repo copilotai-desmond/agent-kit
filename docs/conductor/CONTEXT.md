@@ -4,6 +4,10 @@ An agent mode: the standing reference for how a coding agent plans, delegates to
 
 ## Work
 
+**Operator**:
+The person who directs the work and owns the calls conductor must not make alone: irreversible actions and product or preference choices.
+_Avoid_: User (that is the product's end user), owner, human
+
 **Playbook**:
 The fixed sequence of steps conductor follows for one kind of task, ending in the reply that task owes.
 _Avoid_: Workflow, recipe, procedure
