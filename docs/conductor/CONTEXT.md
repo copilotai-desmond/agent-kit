@@ -1,0 +1,95 @@
+# Conductor
+
+An agent mode: the standing reference for how a coding agent plans, delegates to cheaper models without losing quality, verifies, and reports, in any harness and with any provider.
+
+## Work
+
+**Playbook**:
+The fixed sequence of steps conductor follows for one kind of task, ending in the reply that task owes.
+_Avoid_: Workflow, recipe, procedure
+
+**Orchestrator**:
+The agent that runs the playbook, owns its verdicts, and writes the briefs. It runs on the session's model.
+_Avoid_: Lead, main agent, parent, root
+
+**Brief**:
+The written handoff a fresh delegate starts from: goal, scope, context pointers, acceptance, gate and report shape.
+_Avoid_: Prompt, task description, instructions
+
+**Delegate**:
+An agent the orchestrator spawns to do one scoped piece of a playbook step.
+_Avoid_: Subagent, worker, helper
+
+**Work state**:
+The plan, progress and pickup point of a piece of work: what is done, what is next, what is blocked.
+_Avoid_: Status, todos, progress notes
+
+**Tracker**:
+The issue tracker a repo declares. When one is declared it holds the work state, and the session's todo list only mirrors the current playbook's steps.
+_Avoid_: Board, backlog, ticket system
+
+## Routing
+
+**Role**:
+A job a delegate does inside a playbook, such as explorer, implementer or verifier. Playbooks name roles, never tiers or models.
+_Avoid_: Persona, agent type
+
+**Explorer**:
+The role that reads on the orchestrator's behalf and returns pointers, never conclusions.
+_Avoid_: Researcher, scout, searcher
+
+**Implementer**:
+The role that writes code from a brief that leaves design choices open.
+_Avoid_: Coder, builder, developer
+
+**Editor**:
+The role that applies a brief with nothing left to decide, or runs a command and reports its result.
+_Avoid_: Runner, fixer, mechanic
+
+**Reviewer**:
+The role that reads a diff against the intent and the repo's standards, without running it.
+_Avoid_: Critic, auditor, judge
+
+**Verifier**:
+The role that runs a change on the real artifact and reports pass or fail with evidence. It never wrote the code.
+_Avoid_: Tester, QA, checker
+
+**Tier**:
+A capability class a role defaults to: frontier, strong-code, mechanical or bulk-read.
+_Avoid_: Level, size, budget
+
+**Binding**:
+The mapping, for one harness, from tiers to concrete models and efforts, and from conductor's abstract verbs to that harness's tools.
+_Avoid_: Adapter, config, provider file
+
+**Tier agent**:
+An agent definition file shipped for one tier in a harness that can set a model only per definition file, not per spawn.
+_Avoid_: Custom agent, subagent type
+
+**Doctor**:
+The check that spawns each tier in a harness and confirms the model that actually ran, so a silent fallback is caught.
+_Avoid_: Health check, smoke test
+
+## Quality
+
+**Gate**:
+A mechanical check (test, typecheck, diff, exit code, schema) that can prove a delegate's output without judgment.
+_Avoid_: Review, validation, guard
+
+**Escalation**:
+Re-running a delegate's failed work one tier up, with the gate's failure attached.
+_Avoid_: Retry, fallback
+
+**Principle**:
+A rule of judgment conductor applies across playbooks, kept in its own file and read only when it applies.
+_Avoid_: Guideline, best practice, value
+
+## Configuration
+
+**Setup**:
+Conductor's own step that writes the always-on pointer into a harness's user-level instructions, installs any tier agents, and runs the doctor.
+_Avoid_: Install, bootstrap, init
+
+**Local overlay**:
+An optional, per-machine file of rules conductor loads if present and never shares. It lives at one harness-neutral path.
+_Avoid_: Local config, overrides, preferences

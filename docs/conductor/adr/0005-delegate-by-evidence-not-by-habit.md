@@ -1,0 +1,3 @@
+# Delegate for bulk, isolation or independence, not by habit
+
+The orchestrator delegates a step only when the work is bulk or independent and can run in parallel, when it needs isolating from the orchestrator's context (large reads), or when it is independent verification. Verification is always a delegate. A single dependent chain stays with the orchestrator, implementation included. This departs from the common rule that the lead never writes code. Anthropic's cost guidance (claude-api reference, 2026-10) measured the strong model at lower effort beating an orchestrator with cheap workers on dependent chains in every case. A fresh delegate also pays for a brief and a cold cache that a small sequential change never earns back.
