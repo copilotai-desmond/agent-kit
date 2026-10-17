@@ -32,6 +32,28 @@ _Avoid_: Status, todos, progress notes
 The issue tracker a repo declares. When one is declared it holds the work state, and the session's todo list only mirrors the current playbook's steps.
 _Avoid_: Board, backlog, ticket system
 
+## Shipping
+
+**Stack**:
+A chain of PRs where each PR's base is the branch of the PR below it, and the lowest one targets trunk.
+_Avoid_: Train, chain, series
+
+**Bottom PR**:
+The lowest unmerged PR in a stack. Babysitting works only on it until it merges.
+_Avoid_: Frontier (that is a tier), head PR, first PR
+
+**Verdict**:
+A verifier's PASS, PASS+NOTES or FAIL for one PR, tied to the commits it ran on and the base under them.
+_Avoid_: Approval, sign-off, green
+
+**Run**:
+The contiguous verified PRs from the bottom of a stack up to the first PR without a passing verdict. Only a run lands.
+_Avoid_: Batch, train
+
+**Ceiling**:
+The top PR of a run. Landing stops there.
+_Avoid_: Tip, limit
+
 ## Routing
 
 **Role**:
