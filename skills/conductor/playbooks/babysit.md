@@ -31,7 +31,7 @@ Babysitting starts when the operator asks, normally once a phase or a whole stac
    Resolve only bot threads and threads you fixed, through the GraphQL `resolveReviewThread` mutation. Leave human reviewers' threads for them.
 7. **Classify CI before any rerun.** Read the failing log first.
    - Flake or infrastructure earns one fresh rerun with `gh run rerun <run-id> --failed`. One only. An identical second failure was never a flake, so reclassify it and read the logs.
-   - A failure in code the diff never touched suggests a stale base. Check with `git merge-base --is-ancestor origin/<baseRefName> <branch>`, using the base from step 4. If the base is not an ancestor, report a rebase and stop. Do not spend reruns on it.
+   - A failure in code the diff never touched suggests a stale base. Check with `git merge-base --is-ancestor origin/<baseRefName> <branch>`, using the base from step 4. If the base is not an ancestor, report a rebase and stop work on that PR's CI. Do not spend reruns on it.
    - A failure in the diff's own code gets a commit, test first. See [fix-root-causes](../principles/fix-root-causes.md).
 
    Wait with `gh pr checks <pr> --watch`. After every push, re-read the PR and its threads when the watch returns.

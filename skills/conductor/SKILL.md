@@ -22,7 +22,8 @@ This folder holds everything conductor needs. Never route to a skill outside it.
 3. Read the repo's own agent rules: `AGENTS.md`, the instruction files your binding names, and the repo's skills. Repo rules win over the local overlay, which wins over conductor.
 4. Match the task to a playbook below and read it.
 5. **track** each step's bold lead as the first todos, copied word for word. A step you will not do stays, marked `skip: <reason>`. Task-specific todos come after.
-6. If the repo declares an issue tracker, the tracker holds the work state (plan, progress, what is next). The todo list only mirrors the playbook's steps.
+6. Before the first edit of a playbook that changes code, branch off current `origin/<trunk>`. If the tree has unrelated work, use a fresh worktree.
+7. If the repo declares an issue tracker, the tracker holds the work state (plan, progress, what is next). The todo list only mirrors the playbook's steps.
 
 ## Verbs
 

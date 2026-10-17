@@ -4,7 +4,7 @@
 
 Use `gh` only. No scripts. A reviewer and verifier that already ran on this head count. Do not rerun them.
 
-1. **Branch off current trunk.** Run `git fetch` and branch from `origin/<trunk>`. A branch with unrelated dirty work gets a fresh worktree and the change applied there. isolate any delegate that writes (see [separate-before-sharing](../principles/separate-before-sharing.md)).
+1. **Confirm the branch.** The work should already sit on a branch off current `origin/<trunk>` (SKILL.md, start of every task). If it is on trunk or carries unrelated work, move it to a fresh branch or worktree before anything else, and rerun any review that ran on the old head. isolate any delegate that writes (see [separate-before-sharing](../principles/separate-before-sharing.md)).
 2. **Make landable commits.** Each commit stands alone, in an order that tells the story. Amend a fix into the commit it belongs to. Make a new commit when the fix is separable. A commit body adds what the subject does not say.
 3. **Review before the PR exists.** spawn a fresh reviewer on the branch, per roles.md Diversity. Give it the intent, the repo's standards and the diff, and fix what it proves. If behaviour changed, spawn a verifier too, to run the change on the real surface. See [prove-it-works](../principles/prove-it-works.md). Go on only when both come back clean.
 4. **Write the title and body.** The repo's own PR and commit format wins, so look for a PR template, a contributing guide and recent merged PRs first. With none on record, use a Conventional Commits title, `type(scope): subject`, imperative, no trailing period. Write a one-minute briefing under `##` headings in this order, dropping any with nothing to say.

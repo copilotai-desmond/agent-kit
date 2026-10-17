@@ -4,7 +4,7 @@
 
 Only an explicit operator request to land, ship or merge starts this playbook. [Babysit](babysit.md) never does. The request authorises the merges below, and nothing beyond the PRs it names.
 
-1. **Get a verdict on every PR.** spawn one verifier per PR, per roles.md Diversity. Verifiers that run servers in parallel get isolate. Brief each to run the change on the real surface the way a user would, comparing trunk against the PR head, and to post `PASS`, `PASS+NOTES` or `FAIL` with evidence on the PR. Green CI and a bot approval are not verdicts, because neither runs the change as a user would. See [prove-it-works](../principles/prove-it-works.md). Record the head SHA each verdict covers as `<verdict-sha>`, and the base tip it was run against as `<verdict-base>`.
+1. **Get a verdict on every PR.** spawn one verifier per PR, per roles.md Diversity. Verifiers that run servers in parallel get isolate. Brief each to run the change on the real surface the way a user would, comparing the PR's base branch against its head, and to post `PASS`, `PASS+NOTES` or `FAIL` with evidence on the PR. Green CI and a bot approval are not verdicts, because neither runs the change as a user would. See [prove-it-works](../principles/prove-it-works.md). Record the head SHA each verdict covers as `<verdict-sha>`, and the tip of `origin/<baseRefName>` it ran on as `<verdict-base>`.
 2. **Find the run.** Walk up from the lowest unmerged PR and stop at the first one without `PASS` or `PASS+NOTES`. Everything below it is the run and the top PR is the ceiling. A verified PR above an unverified one waits, because it cannot land without the code beneath it. A PR that neither holds nor needs that code may move onto trunk and land alone, but it needs a fresh verdict first, because its old one ran with that code beneath it.
 3. **Check each verdict still describes the code.** A rebase moves every PR above it to a new SHA without failing any check. Compare the PR's own commits, not only its tip.
 
@@ -12,7 +12,7 @@ Only an explicit operator request to land, ship or merge starts this playbook. [
    git range-diff <verdict-base>..<verdict-sha> <current-base>..<head-sha>
    ```
 
-   Identical commits mean the verdict stands. Report any tests-only or docs-only difference and let it stand. Any other changed or added commit needs a fresh review and a fresh verdict, and the run now ends below that PR unless it comes back clean.
+   `<current-base>` is the tip of `origin/<baseRefName>` now, and `<head-sha>` is the PR's head now. Identical commits mean the verdict stands. Commits shown as removed because a parent PR landed underneath are expected. Report any tests-only or docs-only difference and let it stand. Any other changed or added commit needs a fresh review and a fresh verdict, and the run now ends below that PR unless it comes back clean.
 4. **Land bottom-up, one PR at a time.** Merge the lowest unmerged PR in the run, only after its checks pass, using the repo's merge method.
 
    ```
