@@ -4,7 +4,7 @@
 
 **Why:** Passing checks prove the checks pass. Only the real artifact proves the change works.
 
-- Name the artifact the operator will use. That may be a running app, a built package, a command's output or a rendered page.
+- Name the artifact its users will use. That may be a running app, a built package, a command's output or a rendered page.
 - Run that artifact and watch the changed behaviour happen. A unit test, a typecheck or a green build is a proxy.
 - Check the failure path as well as the success path. Show the error case behaving.
 - Give the verifier the run to do. Do not accept a delegate's "done" as evidence.

@@ -4,16 +4,18 @@ What `/conductor setup` does. Follow these steps and nothing else.
 
 Writing the operator's instruction file is reversible and is the whole purpose of setup. Proceed without asking. Show the diff in the reply.
 
-1. **Detect the harness.** Find your own harness. Read `bindings/<harness>.md`. With no binding, stop and say conductor has no binding for this harness, so nothing was written.
-2. **Write the pointer.** The binding names the user-level instruction file. Build the block below. Then edit the file.
-   - Block present between the markers, replace it.
-   - Block absent, append it after a blank line.
-   - File missing, create it with the block.
-   - Touch nothing outside the markers.
-   - If the block already matches, change nothing and say so.
-3. **Install tier agents.** Only if the binding lists them. Install any that are missing or differ. Skip ones that are already correct. If the binding lists none, say so.
-4. **Run the doctor.** Run the binding's doctor recipe. Keep its table.
-5. **Reply.** Lead with whether routing works. Then list what was written, what was already correct, and the doctor table. Include the diff of the instruction file. Name every mismatch the doctor found and its likely cause.
+1. **Detect the harness.** Find your own harness. Read `bindings/<harness>.md` and its setup file. With no binding, stop and say conductor has no binding for this harness, so nothing was written.
+2. **Confirm the skill is discoverable.** The binding names where an installed skill must live to load from any repo. If conductor is not there, say how to install it and stop.
+3. **Write the pointer.** The binding names the user-level instruction file. Check in this order.
+   - The block between the markers already matches. Change nothing and say so.
+   - Exactly one block exists and differs. Replace it.
+   - No markers. Append the block after a blank line.
+   - The file is missing. Create it with the block.
+   - A lone marker or more than one block. Stop and show the operator the lines. Do not guess.
+   - Never touch anything outside the markers.
+4. **Install tier agents.** Only if the binding lists them. Install any that are missing or differ. Skip ones that are already correct. If the binding lists none, say so.
+5. **Run the doctor.** Run the binding's doctor recipe. Keep its table.
+6. **Reply.** Lead with whether routing works. Then list what was written, what was already correct, and the doctor table. Include the diff of the instruction file. Name every mismatch the doctor found and its likely cause.
 
 ## The pointer
 

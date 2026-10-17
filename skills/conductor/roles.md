@@ -1,6 +1,6 @@
 # Roles
 
-Playbooks name roles. This table gives each role its tier. Your binding gives each tier a model. Change a role's tier here and every playbook follows.
+Playbooks name roles. This table gives each role its tier. Your binding gives each tier a model.
 
 | Role | Tier | Does | Gate that proves it |
 |---|---|---|---|
@@ -18,15 +18,15 @@ Playbooks name roles. This table gives each role its tier. Your binding gives ea
 - **mechanical**: work the brief fully specifies.
 - **bulk-read**: reading and condensing.
 
-A role may run on mechanical or bulk-read only behind its gate. If a task has no gate, give it to a role on strong-code or above.
+A role may run on mechanical or bulk-read only behind its gate, and the orchestrator reruns that gate before accepting the result. If a task has no gate, give it to a role on strong-code or above.
 
 ## Escalation
 
-When a gate fails, send the same brief one tier up, with the failure pasted in. bulk-read and mechanical go up one step as the binding lists. strong-code goes to frontier. A failure at frontier comes back to you. Never retry at the same tier.
+Each gate failure moves the same brief one tier up, with the failure pasted in. bulk-read and mechanical go up as the binding lists. strong-code goes to frontier. A failure at frontier, or a second failure on the same premise, comes back to you. Never rerun at the same tier.
 
 ## Diversity
 
-A reviewer or verifier runs on a different model family from the delegate that wrote the code, when the binding offers one. With one family, use a fresh delegate on a different tier. A reviewer or verifier never wrote the code it judges.
+A reviewer or verifier never wrote the code it judges, and is never forked. It runs on a different model family from the code's author when the binding offers one. With one family, a fresh delegate at the role's own tier is independent enough.
 
 ## The brief
 
@@ -59,8 +59,8 @@ A delegate that can prove a problem reports ISSUES and lists every problem it ca
 
 ## Follow-ups
 
-New work goes to a fresh delegate with consolidated scope: the original brief, every later instruction, and the prior report. Reuse a running delegate only when the work needs state that lives in it, such as uncommitted changes or a running server.
+New work goes to a fresh delegate with consolidated scope: the original brief, every later instruction, and the prior report. **continue** a running delegate only when the work needs state that lives in it, such as uncommitted changes or a running server.
 
 ## Measuring routing (opt-in)
 
-When the operator asks to measure routing, record one row per delegation: role, tier, model, rough tokens, gate result (passed, escalated, failed). The log's place and exact format are not settled yet. Until they are, keep it as a table in the decision trail and say where it is.
+When the operator asks to measure routing, record one row per delegation: role, tier, model, rough tokens, gate result (passed, escalated, failed). The log's place and exact format are not settled yet. Until they are, keep the rows as a table in a file outside the repo's tree and give its path in the reply.

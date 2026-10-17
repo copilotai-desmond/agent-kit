@@ -10,6 +10,6 @@
 - Finish and check a unit before starting the next. Never stack unchecked work.
 - Commit at each passing unit so a failure rolls back one step.
 - When a unit fails its gate, fix that unit. Do not carry the failure forward.
-- Delegate a unit only if it has a gate that proves it and a scope another delegate does not write. See `separate-before-sharing.md`.
+- Delegate a unit only if it has a gate that proves it and a scope another delegate does not write. See [separate-before-sharing](separate-before-sharing.md).
 
-**Example.** A rename across forty files becomes three units. Add the new name beside the old, move callers in batches that each typecheck, then delete the old name.
+**Example.** A rename across forty files becomes three units. Split the callers into three groups of about fifteen files. Each unit renames the definition and one group, and the typecheck must pass before the next. The last unit deletes the old name, so one PR ends with no old name left.

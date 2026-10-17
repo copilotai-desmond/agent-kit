@@ -8,7 +8,6 @@
 - Name each test for the behaviour it protects, in the domain's words.
 - Never assert on private calls, call counts or internal structure when an outcome can be asserted instead.
 - Fake only what you do not control, such as the network, the clock or a paid service. Keep your own code real.
-- Write the test first and watch it fail for the right reason.
 - A test that must change when you refactor with no behaviour change is wrong. Rewrite it or delete it.
 - A test that cannot fail is noise. Delete it.
 
