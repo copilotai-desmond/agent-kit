@@ -50,7 +50,7 @@ Delegates run in the background and notify on completion. Do not poll. Start the
 - **Fork locks the model.** A fork runs on the session model and takes no `model` or `effort`. It saves context, not cost.
 - **Effort needs a recent version.** Per-spawn `effort` needs v2.1.292 or later. On an older version it is ignored. `CLAUDE_CODE_EFFORT_LEVEL` overrides it on any version. The reply cannot show effort, so read it from `agent-<id>.meta.json` and check `claude --version`.
 - **Delegates cannot ask the operator.** `AskUserQuestion` is removed from every subagent. A brief must settle every decision, and a delegate that hits a question reports BLOCKED.
-- **Explore ignores the variable.** `CLAUDE_CODE_SUBAGENT_MODEL` alone does not change `Explore`. The per-spawn `model` still applies.
+- **Explore ignores the variable.** `CLAUDE_CODE_SUBAGENT_MODEL` alone does not change `Explore`. The per-spawn `model` and `effort` still apply. On v2.1.302 an `Explore` spawn with `haiku` and `low` ran on `claude-haiku-5-5` at `low`, read from its transcript.
 - **The advisor tool.** Every delegate is given a built-in `advisor` tool that runs on `opus`. The delegate's own turns run on the requested model, but each advisor call spends frontier tokens. A UI may show the advisor model and make routing look broken when it is not. Briefs for mechanical and bulk-read delegates say "do not consult the advisor; if stuck, report BLOCKED". Escalation then goes through the one-tier-up rule.
 - **Fresh cache.** A non-fork delegate starts with an empty prompt cache and no conversation. The brief is all it has.
 
@@ -61,7 +61,7 @@ Delegates run in the background and notify on completion. Do not poll. Start the
 
 ## Doctor
 
-For each tier in the table, spawn one tiny delegate with that tier's `model` and `effort`. Use `general-purpose` and this brief.
+For each tier in the table, spawn one tiny delegate with that tier's `model` and `effort`. Use `general-purpose`, plus one `Explore` probe for the bulk-read tier, since explorers spawn as `Explore`. Use this brief.
 
 ```
 Reply with only the exact model name or ID stated in your system prompt.
