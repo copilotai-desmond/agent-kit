@@ -419,13 +419,15 @@ test('a delegate on another model than its definition asks for is flagged, and s
   quietHost(
     on,
     { '/repo/.claude/agents/conductor-reviewer.md': '---\nmodel: opus\neffort: high\ndisallowedTools: Agent, Edit, Write\n---\n' },
-    [' M a.ts\n', ' M a.ts\n?? b.ts\n'],
+    [' M a.ts\n', ' M a.ts\n?? b.ts\n', ' M a.ts\n?? b.ts\n'],
   )
   on('agent.list', () => ({ value: [{ id: 'r1', type: 'conductor-reviewer', description: 'Review unit 1', status: 'completed' }] }))
   on('agent.spawn', () => ({ model: 'sonnet', agentId: 'r1' }))
 
   await spawn($, 'Review unit 1', 'conductor-reviewer')
   await runTurn($, 'r1', 'claude-sonnet-5-5', 'medium', 'STATUS PASS')
+  await spawn($, 'Review unit 1', 'conductor-reviewer', { resume: { agentId: 'r1' } })
+  await runTurn($, 'r1', 'claude-sonnet-5-5', 'medium', 'Noted.')
   await openPane($)
 
   const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })

@@ -255,6 +255,12 @@ describe('todos', () => {
     expect(second.items[1]?.startedAt).toBeUndefined()
   })
 
+  test('a call without a title or link keeps the ones before; an empty string clears them', () => {
+    const first = applyTodos(undefined, { title: 'feature', link: 'https://x/1', items: [] }, 1)
+    expect(applyTodos(first, { items: [] }, 2)).toEqual({ title: 'feature', link: 'https://x/1', items: [] })
+    expect(applyTodos(first, { title: '', items: [] }, 2)).toEqual({ link: 'https://x/1', items: [] })
+  })
+
   test('an item that goes back to pending forgets when it started', () => {
     const first = applyTodos(undefined, { items: [{ content: 'Map', status: 'in_progress' }] }, 100)
     expect(applyTodos(first, { items: [{ content: 'Map', status: 'pending' }] }, 500).items[0]?.startedAt).toBeUndefined()
@@ -304,6 +310,9 @@ describe('delegates', () => {
     expect(parseAgentDef('---\r\nmodel: opus\r\ndisallowedTools:\r\n  - Agent\r\n  - Edit\r\n---\r\n')).toEqual({ model: 'opus', isReadOnly: true })
     expect(parseAgentDef('---\ntools: Read, Grep, Bash\n---\n').isReadOnly).toBe(true)
     expect(parseAgentDef('---\ntools: Read, Edit\n---\n').isReadOnly).toBe(false)
+    expect(parseAgentDef('---\ntools:\n- Read\n- Edit\n---\n').isReadOnly).toBe(false)
+    expect(parseAgentDef('---\ndisallowedTools:\n- Edit\n---\n').isReadOnly).toBe(true)
+    expect(parseAgentDef('---\ntools:\nmodel: opus\n---\n')).toEqual({ model: 'opus', isReadOnly: false })
   })
 
   test('changed files are the porcelain lines a snapshot did not have', () => {

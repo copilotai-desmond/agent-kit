@@ -411,6 +411,7 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    $.clock.every(TICK_MS, () => void tick($))
     await $.command.register({
       name: 'activity',
       description: 'Show or hide the session activity pane; `/activity stop-all` stops every background server and orphan',
@@ -419,7 +420,6 @@ export const register: Register = (on, options) => {
       const root = await sessionRoot($)
       await update($, rootPidA, () => root)
     } catch {}
-    $.clock.every(TICK_MS, () => void tick($))
     try {
       await $.tool.register({ name: TODO_TOOL, description: TODO_DESCRIPTION, inputSchema: TODO_SCHEMA, isDeferred: false })
     } catch {}
@@ -520,7 +520,7 @@ export const register: Register = (on, options) => {
     if (ran.deny !== undefined || ran.isError || e.agentId) return ran
     const now = await $.clock.now()
     const items = e.todos.map(t => ({ content: t.content, status: t.status }))
-    await update($, todosA, prev => applyTodos(prev, { ...(prev.title ? { title: prev.title } : {}), ...(prev.link ? { link: prev.link } : {}), items }, now))
+    await update($, todosA, prev => applyTodos(prev, { items }, now))
     return ran
   }).catch(($, e, next) => next(e))
 
@@ -534,7 +534,7 @@ export const register: Register = (on, options) => {
     const call = agentCalls.get(e.tool_use_id)
     agentCalls.delete(e.tool_use_id)
     const resumed = e.resume ? (await read($, spawnsA))[e.resume.agentId] : undefined
-    const def = e.resume ? { isReadOnly: resumed?.isReadOnly ?? false } : await agentDef($, e.subagentType)
+    const def = resumed ? { isReadOnly: resumed.isReadOnly ?? false } : await agentDef($, e.subagentType)
     const [todos, before] = await Promise.all([read($, todosA), def.isReadOnly ? gitStatus($) : undefined])
     const spawned = await next(e)
     const id = spawned.agentId
@@ -580,7 +580,8 @@ export const register: Register = (on, options) => {
         [id]: {
           ...all[id],
           verdict: verdict ?? all[id]?.verdict,
-          changedFiles: after === undefined ? all[id]?.changedFiles : newChanges(info.treeBefore ?? [], after),
+          // A resume retakes the snapshot, so its count must not erase an earlier run's.
+          changedFiles: after === undefined ? all[id]?.changedFiles : Math.max(all[id]?.changedFiles ?? 0, newChanges(info.treeBefore ?? [], after)),
         },
       }))
     }
@@ -740,7 +741,7 @@ export const register: Register = (on, options) => {
       const m = metrics[a.id] ?? { toolUses: 0, tokens: 0, activity: [] }
       const sp: SpawnInfo = spawns[a.id] ?? {}
       const isWrongModel = sp.wantModel !== undefined && m.model !== undefined && !modelMatches(sp.wantModel, m.model)
-      const isWrongEffort = sp.wantEffort !== undefined && m.effort !== undefined && sp.wantEffort !== m.effort
+      const isWrongEffort = sp.wantEffort !== undefined && m.effort !== undefined && /^[a-z]+$/.test(m.effort) && sp.wantEffort !== m.effort
       const isRouted = (sp.wantModel !== undefined || sp.wantEffort !== undefined) && m.model !== undefined && !isWrongModel && !isWrongEffort
       const prior = sp.escalatedFrom ? metrics[sp.escalatedFrom] : undefined
       const priorVerdict = sp.escalatedFrom ? spawns[sp.escalatedFrom]?.verdict : undefined
@@ -774,7 +775,7 @@ export const register: Register = (on, options) => {
           : undefined,
         sp.changedFiles ? `⚠ ${sp.changedFiles} file${sp.changedFiles === 1 ? '' : 's'} changed in the tree while this read-only agent ran` : undefined,
       ].filter((w): w is string => w !== undefined)
-      const icon = warnings.length > 0 && !isActive ? { glyph: '⚠', color: 'warning' } : agentIcon(a)
+      const icon = warnings.length > 0 && a.status === 'completed' ? { glyph: '⚠', color: 'warning' } : agentIcon(a)
       return (
         <Box key={key} flexDirection="column">
           {titleLine(key, `${indent}${icon.glyph}`, icon.color, `${role}${a.name ? `${a.name}: ` : ''}${a.description}`, right)}

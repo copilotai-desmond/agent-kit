@@ -326,7 +326,9 @@ export function applyTodos(prev: TodoList | undefined, input: TodoInput, now: nu
     const startedAt = status === 'pending' ? undefined : (prev?.items.find(p => p.content === content)?.startedAt ?? (status === 'in_progress' ? now : undefined))
     return { content, status, ...(note ? { note } : {}), ...(startedAt === undefined ? {} : { startedAt }) }
   })
-  return { ...(input.title ? { title: input.title } : {}), ...(input.link ? { link: input.link } : {}), items }
+  const title = input.title ?? prev?.title
+  const link = input.link ?? prev?.link
+  return { ...(title ? { title } : {}), ...(link ? { link } : {}), items }
 }
 
 export function currentTodo(list: TodoList): string | undefined {
@@ -348,11 +350,11 @@ export function parseAgentDef(text: string): { model?: string; effort?: string; 
     if (inline) return inline
     const items: string[] = []
     for (const l of lines.slice(at + 1)) {
-      const m = /^\s+-\s*(.+)$/.exec(l)
+      const m = /^\s*-\s*(.+)$/.exec(l)
       if (!m) break
       items.push(m[1]!.trim())
     }
-    return items.join(', ')
+    return items.length > 0 ? items.join(', ') : undefined
   }
   const model = field('model')
   const effort = field('effort')
