@@ -273,3 +273,162 @@ test('stopped monitors collapse into one row that expands on show', async ($, on
   await ui.press({ key: 'group:stopped-monitors:show' })
   expect(await ui.find({ key: 'shell:m1:toggle' })).toBeDefined()
 })
+
+const TODOS = 'mcp__session-activity__todos'
+const STEPS = [
+  { content: 'Map the subsystem', status: 'completed' },
+  { content: 'Build in small units', status: 'in_progress' },
+  { content: 'Open the PR', status: 'pending' },
+  { content: 'Measure routing', status: 'skipped', note: 'not asked' },
+] as const
+
+function quietHost(on: Parameters<Parameters<typeof test>[1]>[1], files: Record<string, string> = {}, status: string[] = ['']) {
+  on('ui.panes', () => ({ value: [] }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/repo' }))
+  on('env.get', () => ({ value: '/home/me' }))
+  on('fs.read', (_$, e) => {
+    const text = files[e.path]
+    if (text === undefined) throw new Error('ENOENT')
+    return { value: text }
+  })
+  on('process.run', (_$, e) => {
+    const stdout = e.argv[0] === 'git' ? (status.length > 1 ? status.shift()! : status[0]!) : e.argv[0] === 'sh' ? 'feat/x\norigin/main\n2\n1\n' : ''
+    return { value: { exitCode: e.argv[0] === 'gh' ? 1 : 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+}
+
+async function runTurn($: Parameters<Parameters<typeof test>[1]>[0], agentId: string, model: string, effort: string, answer = '') {
+  for await (const _chunk of $.turn.step({ turnId: `t-${agentId}`, index: 0, model, effort, messageCount: 1, agentId })) {
+  }
+  await $.turn.complete({ turnId: `t-${agentId}`, agentId, answer, durationMs: 1, isAborted: false, reason: 'completed' })
+}
+
+function stepTurns(on: Parameters<Parameters<typeof test>[1]>[1]) {
+  on('turn.step', async function* (_$, e) {
+    const usage = { input_tokens: 1000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: e.model }
+    yield { kind: 'stop', stopReason: 'end_turn', usage } as const
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage } as const
+  })
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
+}
+
+test('the todos tool draws the list with its title, progress, branch and skipped reason', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  quietHost(on)
+  on('agent.list', () => ({ value: [] }))
+
+  const saved = await $.tool.call({ tool: TODOS, title: 'feature', link: 'https://github.com/o/r/issues/512', items: STEPS })
+  expect(saved.result).toMatch(/Saved 4 items, 2 done/)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'session-activity', surface, ...PANE })
+    expect(await ui.find({ type: 'Text', text: /FEATURE · 2 of 4 done/ })).toBeDefined()
+    expect(await ui.find({ type: 'Link', label: '#512' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'feat/x · 2 behind main · 1 changed · no PR' })).toBeDefined()
+    expect(await ui.find({ key: 'todo:Build in small units:toggle' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'skip: not asked' })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('the todos tool refuses a bad status and keeps the list it had', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  quietHost(on)
+  on('agent.list', () => ({ value: [] }))
+  await $.tool.call({ tool: TODOS, items: STEPS })
+  const refused = await $.tool.call({ tool: TODOS, items: [{ content: 'x', status: 'done' }] })
+  expect(refused.result).toMatch(/Not saved: .*status/)
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /TODOS · 2 of 4 done/ })).toBeDefined()
+})
+
+test('an agent sits under the step in progress when it was spawned, with its verdict; a finished step folds it', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  quietHost(on, { '/home/me/.claude/agents/conductor-editor.md': '---\nmodel: haiku\neffort: low\ndisallowedTools: Agent\n---\n' })
+  let status: string = 'running'
+  on('agent.list', () => ({ value: [{ id: 'a1', type: 'conductor-editor', description: 'Rename atoms', status }] }))
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'a1' }))
+  stepTurns(on)
+
+  await $.tool.call({ tool: TODOS, items: STEPS })
+  await $.agent.spawn({ prompt: 'brief', description: 'Rename atoms', subagentType: 'conductor-editor' })
+  await runTurn($, 'a1', 'claude-haiku-5-5', 'low', 'STATUS     PASS\nDID  lib.ts')
+  await $.command.run({ command: 'activity', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+
+  let ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  expect((await ui.find({ key: 'agent:a1:toggle' }))?.text).toMatch(/editor {2}Rename atoms/)
+  expect(await ui.find({ type: 'Text', text: 'PASS' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Haiku 5\.5 · low ✓/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /OTHER AGENTS/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /1 agent/ })).toBeDefined()
+  await ui.unmount()
+
+  status = 'completed'
+  await $.tool.call({ tool: TODOS, items: STEPS.map(s => (s.content === 'Build in small units' ? { ...s, status: 'completed' } : s)) })
+  ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: '1 agent ✓' })).toBeDefined()
+  expect(await ui.find({ key: 'agent:a1:toggle' })).toBeUndefined()
+  await ui.press({ key: 'todo:Build in small units:toggle' })
+  expect(await ui.find({ key: 'agent:a1:toggle' })).toBeDefined()
+})
+
+test('a delegate on another model than its definition asks for is flagged, and so is a read-only one that changed the tree', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  quietHost(
+    on,
+    { '/repo/.claude/agents/conductor-reviewer.md': '---\nmodel: opus\neffort: high\ndisallowedTools: Agent, Edit, Write\n---\n' },
+    [' M a.ts\n', ' M a.ts\n?? b.ts\n'],
+  )
+  on('agent.list', () => ({ value: [{ id: 'r1', type: 'conductor-reviewer', description: 'Review unit 1', status: 'completed' }] }))
+  on('agent.spawn', () => ({ model: 'sonnet', agentId: 'r1' }))
+  stepTurns(on)
+
+  await $.agent.spawn({ prompt: 'brief', description: 'Review unit 1', subagentType: 'conductor-reviewer' })
+  await runTurn($, 'r1', 'claude-sonnet-5-5', 'medium', 'STATUS ISSUES')
+  await $.command.run({ command: 'activity', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /AGENTS · 0 running/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /⚠ ran Sonnet 5\.5 medium; its definition asks for opus high/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /⚠ 1 file changed in the tree while this read-only agent ran/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'ISSUES' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /SPEND · Sonnet 5\.5 1\.0k/ })).toBeDefined()
+})
+
+test('the same brief spawned again after it finished shows as an escalation', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  quietHost(on)
+  const agents = [{ id: 'e1', type: 'general-purpose', description: 'Fix tsc', status: 'completed' as const }]
+  on('agent.list', () => ({ value: agents }))
+  let next = 'e1'
+  on('agent.spawn', () => ({ model: 'x', agentId: next }))
+  stepTurns(on)
+
+  await $.agent.spawn({ prompt: 'brief', description: 'Fix tsc', subagentType: 'general-purpose' })
+  await runTurn($, 'e1', 'claude-haiku-5-5', 'low', 'STATUS BLOCKED')
+  await $.command.run({ command: 'activity', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+  next = 'e2'
+  await $.agent.spawn({ prompt: 'brief', description: 'Fix tsc', subagentType: 'general-purpose', model: 'sonnet' })
+  agents.push({ id: 'e2', type: 'general-purpose', description: 'Fix tsc', status: 'completed' })
+  await runTurn($, 'e2', 'claude-sonnet-5-5', 'medium')
+  await $.command.run({ command: 'activity', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+  await $.command.run({ command: 'activity', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /↑ escalated from Haiku 5\.5 \(BLOCKED\)/ })).toBeDefined()
+})
+
+test('under 46 columns the list folds to the current step and the next one', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  quietHost(on)
+  on('agent.list', () => ({ value: [] }))
+  await $.tool.call({ tool: TODOS, items: STEPS })
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE, props: { ...PANE.props, bodyColumns: 40 } })
+  expect(await ui.find({ key: 'todo:Build in small units:toggle' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /next: Open the PR/ })).toBeDefined()
+  expect(await ui.find({ key: 'todo:Map the subsystem:toggle' })).toBeUndefined()
+  await ui.press({ key: 'todos:toggle' })
+  expect(await ui.find({ key: 'todo:Map the subsystem:toggle' })).toBeDefined()
+})

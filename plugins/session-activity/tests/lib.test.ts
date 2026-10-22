@@ -34,6 +34,7 @@ import {
   modelMatches,
   spendByModel,
   newChanges,
+  parseBranch,
 } from '../hooks/lib'
 
 const PS = [
@@ -317,5 +318,13 @@ describe('delegates', () => {
   test('changed files are the porcelain lines a snapshot did not have', () => {
     expect(newChanges([' M a.ts'], ' M a.ts\n?? b.ts\n M c.ts\n')).toBe(2)
     expect(newChanges([], '')).toBe(0)
+  })
+})
+
+describe('branch health', () => {
+  test('the branch script output reads as branch, trunk, behind and changed', () => {
+    expect(parseBranch('feat/x\norigin/main\n3\n      2\n')).toEqual({ branch: 'feat/x', trunk: 'origin/main', behind: 3, changed: 2 })
+    expect(parseBranch('feat/x\norigin/main\n\n0\n')).toEqual({ branch: 'feat/x', trunk: 'origin/main', changed: 0 })
+    expect(parseBranch('')).toBeUndefined()
   })
 })

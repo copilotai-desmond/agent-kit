@@ -1,4 +1,4 @@
-import type { AgentMetrics, AgentRow, AgentStatusWord, Orphan, ShellTask, TodoItem, TodoList, Verdict } from '../types'
+import type { AgentMetrics, AgentRow, AgentStatusWord, BranchHealth, Orphan, ShellTask, TodoItem, TodoList, Verdict } from '../types'
 
 export type ProcRow = { pid: number; ppid: number; pgid: number; cpu: number; rssKb: number; args: string }
 
@@ -362,3 +362,14 @@ export function spendByModel(metrics: Record<string, AgentMetrics>): [string, nu
 export const porcelainLines = (stdout: string) => stdout.split('\n').filter(Boolean)
 
 export const newChanges = (before: readonly string[], stdout: string) => porcelainLines(stdout).filter(l => !before.includes(l)).length
+
+// BRANCH_SCRIPT's four lines: branch, trunk, commits behind trunk, changed files.
+export const BRANCH_SCRIPT =
+  'b=$(git rev-parse --abbrev-ref HEAD) || exit 1; t=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null) || t=origin/main; ' +
+  'echo "$b"; echo "$t"; git rev-list --count "HEAD..$t" 2>/dev/null || echo; git status --porcelain | wc -l'
+
+export function parseBranch(stdout: string): BranchHealth | undefined {
+  const [branch, trunk, behind, changed] = stdout.split('\n').map(l => l.trim())
+  if (!branch) return undefined
+  return { branch, ...(trunk ? { trunk } : {}), ...(behind ? { behind: Number(behind) } : {}), changed: Number(changed) || 0 }
+}
