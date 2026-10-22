@@ -23,7 +23,7 @@ This folder holds everything conductor needs. Never route to a skill outside it.
 4. Match the task to a playbook below and read it.
 5. **track** each step's bold lead as the first todos, copied word for word, with the playbook's name as the list's title. A step you will not do stays, marked skipped with its reason. Task-specific todos come after. Keep the list current so the operator can see the stage and what comes next. See [The todo list](#the-todo-list).
 6. Before the first edit of a playbook that changes code, branch off current `origin/<trunk>`. If the tree has unrelated work, use a fresh worktree.
-7. If the repo declares an issue tracker, the tracker holds the work state (plan, progress, what is next). The todo list only mirrors the playbook's steps.
+7. If the repo declares an issue tracker, the tracker holds the work state (plan, progress, what is next). The todo list holds this session's steps and the todos found on the way, and links to the tracker.
 
 ## Verbs
 
@@ -42,8 +42,8 @@ Playbooks use these. The binding says how each one works in your harness.
 The todo list is how the operator follows the work without reading the transcript. It must always answer two questions: where are we, and what is next.
 
 - **One step in progress.** Mark a step in progress before its first action and done the moment it is, never in a batch at the end. Two steps are in progress together only while their work runs in parallel.
-- **Spawn under the step.** Spawn a delegate while the step it serves is in progress, so its work reads as that step's.
-- **Nested playbooks expand in place.** When a step runs another playbook, such as opening-a-pr, insert that playbook's leads after the step and work through them there.
+- **Spawn under the step.** Spawn a delegate while the step it serves is the one most recently marked in progress, so its work reads as that step's. For parallel steps, spawn each step's delegates before marking the next step in progress.
+- **Nested playbooks expand in place.** When a step runs another playbook, such as opening-a-pr, insert that playbook's leads after the step. The parent step stays in progress until they are done, and they are the only other steps that may be.
 - **Never silently drop a step.** A step that stops applying is marked skipped with its reason. New work found on the way becomes a new todo in the order it will run.
 - **Link the work state.** When the repo declares a tracker, give the list a link to the issue that holds the work state.
 

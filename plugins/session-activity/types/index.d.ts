@@ -91,6 +91,7 @@ declare module 'claude-code' {
       todos: TodoList
       spawns: Record<string, SpawnInfo>
       branch: BranchHealth
+      spend: Record<string, number>
     }
   }
 }

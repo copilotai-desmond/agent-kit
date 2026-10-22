@@ -13,7 +13,6 @@ import {
   parseBranch,
   parseVerdict,
   porcelainLines,
-  spendByModel,
   todoInputError,
   type TodoInput,
   exitCodeOf,
@@ -64,10 +63,14 @@ const confirmA = atom({ plugin: 'session-activity', key: 'confirm' } as const, '
 const expandedA = atom({ plugin: 'session-activity', key: 'expanded' } as const, [])
 const rootPidA = atom({ plugin: 'session-activity', key: 'rootPid' } as const, 0)
 const todosA = atom({ plugin: 'session-activity', key: 'todos' } as const, { items: [] })
+// shortcut: spawn records are never pruned; drop them with mergeAgents' cap if long sessions grow the state.
 const spawnsA = atom({ plugin: 'session-activity', key: 'spawns' } as const, {})
 const branchA = atom({ plugin: 'session-activity', key: 'branch' } as const, { branch: '', changed: 0 })
+const spendA = atom({ plugin: 'session-activity', key: 'spend' } as const, {})
 
 const TODO_TOOL = 'todos'
+const TODO_TOOL_CALL = /^mcp__session-activity__todos$/
+const GH_TIMEOUT_MS = 3000
 const BRANCH_EVERY_MS = 30_000
 const PR_EVERY_MS = 300_000
 const TODO_ICON: Record<TodoStatus, { glyph: string; color: string }> = {
@@ -198,7 +201,7 @@ async function refreshBranch($: $, now: number) {
   const health = out?.exitCode === 0 ? parseBranch(out.stdout) : undefined
   if (!health) return
   if (prLookup?.branch !== health.branch || now - prLookup.at >= PR_EVERY_MS) {
-    const pr = await $.process.run(['gh', 'pr', 'view', '--json', 'number', '-q', '.number']).catch(() => undefined)
+    const pr = await $.process.run(['gh', 'pr', 'view', '--json', 'number', '-q', '.number'], { timeoutMs: GH_TIMEOUT_MS }).catch(() => undefined)
     const n = Number(pr?.stdout.trim())
     prLookup = { branch: health.branch, at: now, ...(pr?.exitCode === 0 && n > 0 ? { pr: n } : {}) }
   }
@@ -416,8 +419,10 @@ export const register: Register = (on, options) => {
       const root = await sessionRoot($)
       await update($, rootPidA, () => root)
     } catch {}
-    await $.tool.register({ name: TODO_TOOL, description: TODO_DESCRIPTION, inputSchema: TODO_SCHEMA, isDeferred: false })
     $.clock.every(TICK_MS, () => void tick($))
+    try {
+      await $.tool.register({ name: TODO_TOOL, description: TODO_DESCRIPTION, inputSchema: TODO_SCHEMA, isDeferred: false })
+    } catch {}
     return started
   })
 
@@ -496,7 +501,8 @@ export const register: Register = (on, options) => {
     return ran
   }).catch(($, e, next) => next(e))
 
-  on('tool.call', { tool: `mcp__session-activity__${TODO_TOOL}` }, async ($, e) => {
+  on('tool.call', { tool: TODO_TOOL_CALL }, async ($, e) => {
+    if (e.agentId) return { result: 'Not saved: only the main conversation writes the todo list the user watches. Keep your own steps in your report.', isError: true }
     const error = todoInputError(e)
     if (error) return { result: `Not saved: ${error}`, isError: true }
     const now = await $.clock.now()
@@ -511,9 +517,10 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: 'TodoWrite' }, async ($, e, next) => {
     const ran = await next(e)
-    if (ran.deny !== undefined || ran.isError) return ran
+    if (ran.deny !== undefined || ran.isError || e.agentId) return ran
     const now = await $.clock.now()
-    await update($, todosA, prev => applyTodos(prev, { items: e.todos.map(t => ({ content: t.content, status: t.status })) }, now))
+    const items = e.todos.map(t => ({ content: t.content, status: t.status }))
+    await update($, todosA, prev => applyTodos(prev, { ...(prev.title ? { title: prev.title } : {}), ...(prev.link ? { link: prev.link } : {}), items }, now))
     return ran
   }).catch(($, e, next) => next(e))
 
@@ -522,23 +529,35 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  // Everything a spawn is filed under is read before `next`, which returns only once the agent has started.
   on('agent.spawn', async ($, e, next) => {
-    const spawned = await next(e)
     const call = agentCalls.get(e.tool_use_id)
     agentCalls.delete(e.tool_use_id)
+    const resumed = e.resume ? (await read($, spawnsA))[e.resume.agentId] : undefined
+    const def = e.resume ? { isReadOnly: resumed?.isReadOnly ?? false } : await agentDef($, e.subagentType)
+    const [todos, before] = await Promise.all([read($, todosA), def.isReadOnly ? gitStatus($) : undefined])
+    const spawned = await next(e)
     const id = spawned.agentId
     if (spawned.deny !== undefined || !id) return spawned
-    const [def, todos, agents] = await Promise.all([agentDef($, e.subagentType), read($, todosA), read($, agentsA)])
-    const prior = agents.filter(a => a.description === e.description && a.type === e.subagentType && !isAgentActive(a.status)).at(-1)
-    const before = def.isReadOnly ? await gitStatus($) : undefined
+    const treeBefore = before === undefined ? undefined : porcelainLines(before)
+    if (resumed) {
+      await update($, spawnsA, all => ({ ...all, [id]: { ...resumed, treeBefore } }))
+      return spawned
+    }
+    const [agents, metrics] = await Promise.all([read($, agentsA), read($, metricsA)])
+    const prior = agents.filter(a => a.id !== id && a.description === e.description && a.type === e.subagentType && !isAgentActive(a.status)).at(-1)
+    const ran = prior ? metrics[prior.id] : undefined
+    const isEscalation =
+      (e.model !== undefined && ran?.model !== undefined && !modelMatches(e.model, ran.model)) ||
+      (call?.effort !== undefined && ran?.effort !== undefined && call.effort !== ran.effort)
     const info: SpawnInfo = {
       todo: e.parentAgentId ? undefined : currentTodo(todos),
       wantModel: e.fork ? undefined : (e.model ?? def.model),
       wantEffort: e.fork ? undefined : (call?.effort ?? def.effort),
       isReadOnly: def.isReadOnly,
       isolation: call?.isolation,
-      escalatedFrom: prior?.id,
-      treeBefore: before === undefined ? undefined : porcelainLines(before),
+      escalatedFrom: isEscalation ? prior?.id : undefined,
+      treeBefore,
     }
     await update($, spawnsA, all => ({ ...all, [id]: info }))
     return spawned
@@ -547,8 +566,14 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const id = e.agentId
     const info = id ? (await read($, spawnsA))[id] : undefined
+    if (id && info && e.usage) {
+      const model = formatModel(e.usage.model)
+      const tokens = usageTokens(e.usage)
+      await update($, spendA, all => ({ ...all, [model]: (all[model] ?? 0) + tokens }))
+    }
     if (id && info) {
       const verdict = parseVerdict(e.answer)
+      // shortcut: porcelain lines miss a second edit to an already-modified file and blame this agent for a concurrent writer's edits; hash `git diff HEAD` if that bites.
       const after = info.treeBefore ? await gitStatus($) : undefined
       await update($, spawnsA, all => ({
         ...all,
@@ -625,7 +650,7 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button, Link } = $.ui.resolve(e)
-    const [agents, metrics, shells, orphans, confirm, expanded, todos, spawns, branch, now] = await Promise.all([
+    const [agents, metrics, shells, orphans, confirm, expanded, todos, spawns, branch, spendTotals, now] = await Promise.all([
       read($, agentsA),
       read($, metricsA),
       read($, shellsA),
@@ -635,6 +660,7 @@ export const register: Register = (on, options) => {
       read($, todosA),
       read($, spawnsA),
       read($, branchA),
+      read($, spendA),
       $.clock.now(),
     ])
 
@@ -713,7 +739,6 @@ export const register: Register = (on, options) => {
     const agentRow = (a: AgentRow) => {
       const m = metrics[a.id] ?? { toolUses: 0, tokens: 0, activity: [] }
       const sp: SpawnInfo = spawns[a.id] ?? {}
-      const icon = agentIcon(a)
       const isWrongModel = sp.wantModel !== undefined && m.model !== undefined && !modelMatches(sp.wantModel, m.model)
       const isWrongEffort = sp.wantEffort !== undefined && m.effort !== undefined && sp.wantEffort !== m.effort
       const isRouted = (sp.wantModel !== undefined || sp.wantEffort !== undefined) && m.model !== undefined && !isWrongModel && !isWrongEffort
@@ -749,6 +774,7 @@ export const register: Register = (on, options) => {
           : undefined,
         sp.changedFiles ? `⚠ ${sp.changedFiles} file${sp.changedFiles === 1 ? '' : 's'} changed in the tree while this read-only agent ran` : undefined,
       ].filter((w): w is string => w !== undefined)
+      const icon = warnings.length > 0 && !isActive ? { glyph: '⚠', color: 'warning' } : agentIcon(a)
       return (
         <Box key={key} flexDirection="column">
           {titleLine(key, `${indent}${icon.glyph}`, icon.color, `${role}${a.name ? `${a.name}: ` : ''}${a.description}`, right)}
@@ -836,7 +862,8 @@ export const register: Register = (on, options) => {
     const isEmpty = agents.length === 0 && shells.length === 0 && orphans.length === 0 && todos.items.length === 0
     const doneCount = todos.items.filter(i => i.status === 'completed' || i.status === 'skipped').length
     const current = currentTodo(todos)
-    const isBad = (a: AgentRow) => a.status === 'failed' || ['ISSUES', 'BLOCKED', 'FAIL'].includes(spawns[a.id]?.verdict ?? '')
+    const isBad = (a: AgentRow) =>
+      a.status === 'failed' || (spawns[a.id]?.changedFiles ?? 0) > 0 || ['ISSUES', 'BLOCKED', 'FAIL'].includes(spawns[a.id]?.verdict ?? '')
 
     const todoRow = (item: TodoItem) => {
       const key = `todo:${item.content}`
@@ -846,7 +873,7 @@ export const register: Register = (on, options) => {
       const count = `${under.length} agent${under.length === 1 ? '' : 's'}`
       const right =
         item.status === 'skipped'
-          ? `skip${item.note ? `: ${item.note}` : ''}`
+          ? `skip${item.note && !isNarrow ? `: ${item.note}` : ''}`
           : item.status === 'in_progress'
             ? [item.startedAt === undefined ? undefined : formatDuration(now - item.startedAt), under.length > 0 ? count : undefined].filter(Boolean).join(' · ')
             : under.length > 0
@@ -914,7 +941,7 @@ export const register: Register = (on, options) => {
         )}
       </Box>
     )
-    const spend = spendByModel(Object.fromEntries(Object.entries(metrics).filter(([id]) => agents.some(a => a.id === id))))
+    const spend = Object.entries(spendTotals).sort((a, b) => b[1] - a[1])
 
     return (
       <Box flexDirection="column" paddingX={1}>

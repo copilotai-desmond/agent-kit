@@ -1,4 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
+import type { AgentStatus, On } from 'claude-code'
+import type { Engine } from 'claude-code/testing'
 
 const PANE = {
   component: 'Pane',
@@ -274,7 +276,6 @@ test('stopped monitors collapse into one row that expands on show', async ($, on
   expect(await ui.find({ key: 'shell:m1:toggle' })).toBeDefined()
 })
 
-const TODOS = 'mcp__session-activity__todos'
 const STEPS = [
   { content: 'Map the subsystem', status: 'completed' },
   { content: 'Build in small units', status: 'in_progress' },
@@ -282,7 +283,28 @@ const STEPS = [
   { content: 'Measure routing', status: 'skipped', note: 'not asked' },
 ] as const
 
-function quietHost(on: Parameters<Parameters<typeof test>[1]>[1], files: Record<string, string> = {}, status: string[] = ['']) {
+type Effort = 'low' | 'medium' | 'high'
+
+const writeTodos = ($: Engine, input: Record<string, unknown>) =>
+  $.tool.call({ tool: 'mcp__session-activity__todos', ...input } as unknown as Parameters<Engine['tool']['call']>[0])
+
+const spawn = ($: Engine, description: string, subagentType: string, extra: { model?: string; resume?: { agentId: string } } = {}) =>
+  $.agent.spawn({
+    tool_use_id: `u-${description}-${Math.random()}`,
+    prompt: 'brief',
+    description,
+    subagentType,
+    provider: { plugin: 'engine', tier: 'core' },
+    parentModel: 'claude-opus-5-5',
+    background: true,
+    fork: false,
+    ...extra,
+  } as unknown as Parameters<Engine['agent']['spawn']>[0])
+
+const openPane = ($: Engine) =>
+  $.command.run({ command: 'activity', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+
+function quietHost(on: On, files: Record<string, string> = {}, status: string[] = ['']) {
   on('ui.panes', () => ({ value: [] }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.status', () => ({ value: undefined }))
@@ -297,15 +319,6 @@ function quietHost(on: Parameters<Parameters<typeof test>[1]>[1], files: Record<
     const stdout = e.argv[0] === 'git' ? (status.length > 1 ? status.shift()! : status[0]!) : e.argv[0] === 'sh' ? 'feat/x\norigin/main\n2\n1\n' : ''
     return { value: { exitCode: e.argv[0] === 'gh' ? 1 : 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
-}
-
-async function runTurn($: Parameters<Parameters<typeof test>[1]>[0], agentId: string, model: string, effort: string, answer = '') {
-  for await (const _chunk of $.turn.step({ turnId: `t-${agentId}`, index: 0, model, effort, messageCount: 1, agentId })) {
-  }
-  await $.turn.complete({ turnId: `t-${agentId}`, agentId, answer, durationMs: 1, isAborted: false, reason: 'completed' })
-}
-
-function stepTurns(on: Parameters<Parameters<typeof test>[1]>[1]) {
   on('turn.step', async function* (_$, e) {
     const usage = { input_tokens: 1000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: e.model }
     yield { kind: 'stop', stopReason: 'end_turn', usage } as const
@@ -314,18 +327,25 @@ function stepTurns(on: Parameters<Parameters<typeof test>[1]>[1]) {
   on('turn.complete', (_$, e) => ({ text: e.answer }))
 }
 
+async function runTurn($: Engine, agentId: string, model: string, effort: Effort, answer = '') {
+  for await (const _chunk of $.turn.step({ turnId: `t-${agentId}`, index: 0, model, effort, messageCount: 1, agentId })) {
+  }
+  const usage = { input_tokens: 400, output_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model }
+  await $.turn.complete({ turnId: `t-${agentId}`, agentId, answer, durationMs: 1, isAborted: false, reason: 'answer', usage })
+}
+
 test('the todos tool draws the list with its title, progress, branch and skipped reason', async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
   quietHost(on)
   on('agent.list', () => ({ value: [] }))
 
-  const saved = await $.tool.call({ tool: TODOS, title: 'feature', link: 'https://github.com/o/r/issues/512', items: STEPS })
+  const saved = await writeTodos($, { title: 'feature', link: 'https://github.com/o/r/issues/512', items: STEPS })
   expect(saved.result).toMatch(/Saved 4 items, 2 done/)
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'session-activity', surface, ...PANE })
     expect(await ui.find({ type: 'Text', text: /FEATURE · 2 of 4 done/ })).toBeDefined()
-    expect(await ui.find({ type: 'Link', label: '#512' })).toBeDefined()
+    expect(await ui.find({ type: 'Link', text: '#512' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'feat/x · 2 behind main · 1 changed · no PR' })).toBeDefined()
     expect(await ui.find({ key: 'todo:Build in small units:toggle' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'skip: not asked' })).toBeDefined()
@@ -333,13 +353,13 @@ test('the todos tool draws the list with its title, progress, branch and skipped
   }
 })
 
-test('the todos tool refuses a bad status and keeps the list it had', async ($, on) => {
+test('the todos tool refuses a bad status, and a subagent, and keeps the list it had', async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
   quietHost(on)
   on('agent.list', () => ({ value: [] }))
-  await $.tool.call({ tool: TODOS, items: STEPS })
-  const refused = await $.tool.call({ tool: TODOS, items: [{ content: 'x', status: 'done' }] })
-  expect(refused.result).toMatch(/Not saved: .*status/)
+  await writeTodos($, { items: STEPS })
+  expect((await writeTodos($, { items: [{ content: 'x', status: 'done' }] })).result).toMatch(/Not saved: .*status/)
+  expect((await writeTodos($, { items: [{ content: 'mine', status: 'pending' }], agentId: 'd1' })).result).toMatch(/Not saved: only the main conversation/)
   const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
   expect(await ui.find({ type: 'Text', text: /TODOS · 2 of 4 done/ })).toBeDefined()
 })
@@ -347,31 +367,51 @@ test('the todos tool refuses a bad status and keeps the list it had', async ($, 
 test('an agent sits under the step in progress when it was spawned, with its verdict; a finished step folds it', async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
   quietHost(on, { '/home/me/.claude/agents/conductor-editor.md': '---\nmodel: haiku\neffort: low\ndisallowedTools: Agent\n---\n' })
-  let status: string = 'running'
+  let status: AgentStatus = 'running'
   on('agent.list', () => ({ value: [{ id: 'a1', type: 'conductor-editor', description: 'Rename atoms', status }] }))
   on('agent.spawn', () => ({ model: 'haiku', agentId: 'a1' }))
-  stepTurns(on)
 
-  await $.tool.call({ tool: TODOS, items: STEPS })
-  await $.agent.spawn({ prompt: 'brief', description: 'Rename atoms', subagentType: 'conductor-editor' })
+  await writeTodos($, { items: STEPS })
+  await spawn($, 'Rename atoms', 'conductor-editor')
   await runTurn($, 'a1', 'claude-haiku-5-5', 'low', 'STATUS     PASS\nDID  lib.ts')
-  await $.command.run({ command: 'activity', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+  await openPane($)
 
   let ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
   expect((await ui.find({ key: 'agent:a1:toggle' }))?.text).toMatch(/editor {2}Rename atoms/)
   expect(await ui.find({ type: 'Text', text: 'PASS' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /Haiku 5\.5 · low ✓/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /OTHER AGENTS/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /1 agent/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /SPEND · Haiku 5\.5 500/ })).toBeDefined()
   await ui.unmount()
 
   status = 'completed'
-  await $.tool.call({ tool: TODOS, items: STEPS.map(s => (s.content === 'Build in small units' ? { ...s, status: 'completed' } : s)) })
+  await writeTodos($, { items: STEPS.map(s => (s.content === 'Build in small units' ? { ...s, status: 'completed' } : s)) })
   ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
   expect(await ui.find({ type: 'Text', text: '1 agent ✓' })).toBeDefined()
   expect(await ui.find({ key: 'agent:a1:toggle' })).toBeUndefined()
   await ui.press({ key: 'todo:Build in small units:toggle' })
   expect(await ui.find({ key: 'agent:a1:toggle' })).toBeDefined()
+})
+
+test('a resumed agent keeps its step and verdict and is no escalation', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  quietHost(on)
+  on('agent.list', () => ({ value: [{ id: 'a1', type: 'general-purpose', description: 'Review', status: 'completed' }] }))
+  on('agent.spawn', () => ({ model: 'opus', agentId: 'a1' }))
+
+  await writeTodos($, { items: STEPS })
+  await spawn($, 'Review', 'general-purpose')
+  await runTurn($, 'a1', 'claude-opus-5-5', 'high', 'STATUS PASS')
+  await writeTodos($, { items: [...STEPS.slice(0, 2).map(s => ({ ...s, status: 'completed' })), { content: 'Open the PR', status: 'in_progress' }] })
+  await spawn($, 'Review', 'general-purpose', { resume: { agentId: 'a1' } })
+  await runTurn($, 'a1', 'claude-opus-5-5', 'high', 'Thanks, noted.')
+  await openPane($)
+
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: '1 agent ✓' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /escalated/ })).toBeUndefined()
+  await ui.press({ key: 'todo:Build in small units:toggle' })
+  expect(await ui.find({ type: 'Text', text: 'PASS' })).toBeDefined()
 })
 
 test('a delegate on another model than its definition asks for is flagged, and so is a read-only one that changed the tree', async ($, on) => {
@@ -383,40 +423,41 @@ test('a delegate on another model than its definition asks for is flagged, and s
   )
   on('agent.list', () => ({ value: [{ id: 'r1', type: 'conductor-reviewer', description: 'Review unit 1', status: 'completed' }] }))
   on('agent.spawn', () => ({ model: 'sonnet', agentId: 'r1' }))
-  stepTurns(on)
 
-  await $.agent.spawn({ prompt: 'brief', description: 'Review unit 1', subagentType: 'conductor-reviewer' })
-  await runTurn($, 'r1', 'claude-sonnet-5-5', 'medium', 'STATUS ISSUES')
-  await $.command.run({ command: 'activity', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+  await spawn($, 'Review unit 1', 'conductor-reviewer')
+  await runTurn($, 'r1', 'claude-sonnet-5-5', 'medium', 'STATUS PASS')
+  await openPane($)
 
   const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
   expect(await ui.find({ type: 'Text', text: /AGENTS · 0 running/ })).toBeDefined()
+  expect((await ui.find({ key: 'agent:r1:toggle' }))?.text).toMatch(/^⚠/)
   expect(await ui.find({ type: 'Text', text: /⚠ ran Sonnet 5\.5 medium; its definition asks for opus high/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /⚠ 1 file changed in the tree while this read-only agent ran/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: 'ISSUES' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /SPEND · Sonnet 5\.5 1\.0k/ })).toBeDefined()
 })
 
-test('the same brief spawned again after it finished shows as an escalation', async ($, on) => {
+test('the same brief spawned again on another model is an escalation; on the same model it is not', async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
   quietHost(on)
-  const agents = [{ id: 'e1', type: 'general-purpose', description: 'Fix tsc', status: 'completed' as const }]
+  const agents: { id: string; type: string; description: string; status: AgentStatus }[] = []
   on('agent.list', () => ({ value: agents }))
-  let next = 'e1'
+  let next = ''
   on('agent.spawn', () => ({ model: 'x', agentId: next }))
-  stepTurns(on)
 
-  await $.agent.spawn({ prompt: 'brief', description: 'Fix tsc', subagentType: 'general-purpose' })
-  await runTurn($, 'e1', 'claude-haiku-5-5', 'low', 'STATUS BLOCKED')
-  await $.command.run({ command: 'activity', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
-  next = 'e2'
-  await $.agent.spawn({ prompt: 'brief', description: 'Fix tsc', subagentType: 'general-purpose', model: 'sonnet' })
-  agents.push({ id: 'e2', type: 'general-purpose', description: 'Fix tsc', status: 'completed' })
-  await runTurn($, 'e2', 'claude-sonnet-5-5', 'medium')
-  await $.command.run({ command: 'activity', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
-  await $.command.run({ command: 'activity', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+  const run = async (id: string, description: string, model: string, effort: Effort, answer: string, spawnModel?: string) => {
+    next = id
+    await spawn($, description, 'general-purpose', spawnModel ? { model: spawnModel } : {})
+    agents.push({ id, type: 'general-purpose', description, status: 'completed' })
+    await runTurn($, id, model, effort, answer)
+    await openPane($)
+    await openPane($)
+  }
+  await run('e1', 'Fix tsc', 'claude-haiku-5-5', 'low', 'STATUS BLOCKED')
+  await run('e2', 'Fix tsc', 'claude-sonnet-5-5', 'medium', 'STATUS PASS', 'sonnet')
+  await run('v1', 'Review branch', 'claude-opus-5-5', 'high', 'STATUS ISSUES', 'opus')
+  await run('v2', 'Review branch', 'claude-opus-5-5', 'high', 'STATUS PASS', 'opus')
 
   const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  expect(await ui.findAll({ type: 'Text', text: /↑ escalated/ })).toHaveLength(1)
   expect(await ui.find({ type: 'Text', text: /↑ escalated from Haiku 5\.5 \(BLOCKED\)/ })).toBeDefined()
 })
 
@@ -424,11 +465,12 @@ test('under 46 columns the list folds to the current step and the next one', asy
   mock.clock(on, { now: 1_000_000 })
   quietHost(on)
   on('agent.list', () => ({ value: [] }))
-  await $.tool.call({ tool: TODOS, items: STEPS })
+  await writeTodos($, { items: STEPS })
   const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE, props: { ...PANE.props, bodyColumns: 40 } })
   expect(await ui.find({ key: 'todo:Build in small units:toggle' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /next: Open the PR/ })).toBeDefined()
   expect(await ui.find({ key: 'todo:Map the subsystem:toggle' })).toBeUndefined()
   await ui.press({ key: 'todos:toggle' })
   expect(await ui.find({ key: 'todo:Map the subsystem:toggle' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'skip' })).toBeDefined()
 })

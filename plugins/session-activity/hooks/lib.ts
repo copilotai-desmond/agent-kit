@@ -1,4 +1,4 @@
-import type { AgentMetrics, AgentRow, AgentStatusWord, BranchHealth, Orphan, ShellTask, TodoItem, TodoList, Verdict } from '../types'
+import type { AgentRow, AgentStatusWord, BranchHealth, Orphan, ShellTask, TodoItem, TodoList, Verdict } from '../types'
 
 export type ProcRow = { pid: number; ppid: number; pgid: number; cpu: number; rssKb: number; args: string }
 
@@ -339,25 +339,29 @@ export const parseVerdict = (answer: string) =>
   /^[*_\s]*STATUS[*_:\s]+(PASS\+NOTES|PASS|ISSUES|BLOCKED|FAIL)\b/m.exec(answer)?.[1] as Verdict | undefined
 
 export function parseAgentDef(text: string): { model?: string; effort?: string; isReadOnly: boolean } {
-  const front = /^---\n([\s\S]*?)\n---/.exec(text)?.[1] ?? ''
-  const field = (name: string) => new RegExp(`^${name}:\\s*(.+)$`, 'm').exec(front)?.[1]?.trim()
+  const lines = (/^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? '').split(/\r?\n/)
+  // A value on the key's own line, or a YAML list on the lines below it.
+  const field = (name: string) => {
+    const at = lines.findIndex(l => l.startsWith(`${name}:`))
+    if (at < 0) return undefined
+    const inline = lines[at]!.slice(name.length + 1).trim()
+    if (inline) return inline
+    const items: string[] = []
+    for (const l of lines.slice(at + 1)) {
+      const m = /^\s+-\s*(.+)$/.exec(l)
+      if (!m) break
+      items.push(m[1]!.trim())
+    }
+    return items.join(', ')
+  }
   const model = field('model')
   const effort = field('effort')
-  const isReadOnly = /\b(Edit|Write)\b/.test(field('disallowedTools') ?? '')
+  const tools = field('tools')
+  const isReadOnly = /\b(Edit|Write)\b/.test(field('disallowedTools') ?? '') || (tools !== undefined && !/\b(Edit|Write)\b|\*/.test(tools))
   return { ...(model ? { model } : {}), ...(effort ? { effort } : {}), isReadOnly }
 }
 
 export const modelMatches = (want: string, ran: string) => want === 'inherit' || ran.includes(want)
-
-export function spendByModel(metrics: Record<string, AgentMetrics>): [string, number][] {
-  const sums = new Map<string, number>()
-  for (const m of Object.values(metrics)) {
-    if (!m.model || m.tokens <= 0) continue
-    const name = formatModel(m.model)
-    sums.set(name, (sums.get(name) ?? 0) + m.tokens)
-  }
-  return [...sums].sort((a, b) => b[1] - a[1])
-}
 
 export const porcelainLines = (stdout: string) => stdout.split('\n').filter(Boolean)
 

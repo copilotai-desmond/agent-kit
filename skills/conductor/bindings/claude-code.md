@@ -23,7 +23,7 @@ Claude Code has one model family. Spawn reviewers and verifiers fresh at their o
 | fork | `Agent` with `subagent_type: "fork"`. Inherits the conversation, system prompt, model and prompt cache | If fork is unavailable, spawn with a full brief |
 | continue | `SendMessage` to the delegate's id | Spawn fresh with the consolidated scope |
 | ask | `AskUserQuestion` with options | In `-p` mode the tool is absent. Ask in plain text, list the options, and stop |
-| track | The session's todo tool: a built-in todo or task tool, or a tool a plugin adds whose description says it holds the todo list. Pass the playbook's name as its title and the tracker issue's URL as its link where it takes them. Mark a skipped step with the tool's skipped status when it has one, else as completed with `skip: <reason>` in its text | If none exists, keep the list in the reply and restate it when it changes |
+| track | The session's todo tool. Prefer a tool whose description says it holds the todo list the operator watches. Otherwise use a built-in todo or task tool. Pass the playbook's name as its title and the tracker issue's URL as its link where it takes them. Mark a skipped step with the tool's skipped status when it has one, else as completed with `skip: <reason>` in its text | If none exists, keep the list in the reply and restate it when it changes |
 | show | Mermaid in the reply for flows. For a mockup, write a throwaway HTML file and publish it with the `Artifact` tool. Screenshots by path | Without `Artifact`, give the file path |
 | isolate | `Agent` with `isolation: "worktree"` | Tell the delegate to `git worktree add` its own path and stay inside it |
 

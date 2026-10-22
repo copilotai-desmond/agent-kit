@@ -32,7 +32,6 @@ import {
   parseVerdict,
   parseAgentDef,
   modelMatches,
-  spendByModel,
   newChanges,
   parseBranch,
 } from '../hooks/lib'
@@ -301,18 +300,10 @@ describe('delegates', () => {
     expect(modelMatches('inherit', 'claude-sonnet-5-5')).toBe(true)
   })
 
-  test('spend sums tokens per model, largest first', () => {
-    expect(
-      spendByModel({
-        a: { toolUses: 0, tokens: 1000, activity: [], model: 'claude-haiku-5-5' },
-        b: { toolUses: 0, tokens: 5000, activity: [], model: 'claude-opus-5-5' },
-        c: { toolUses: 0, tokens: 500, activity: [], model: 'claude-haiku-5-5' },
-        d: { toolUses: 0, tokens: 0, activity: [] },
-      }),
-    ).toEqual([
-      ['Opus 5.5', 5000],
-      ['Haiku 5.5', 1500],
-    ])
+  test('a definition in YAML list form, with CRLF line ends, or with a tools allowlist is read too', () => {
+    expect(parseAgentDef('---\r\nmodel: opus\r\ndisallowedTools:\r\n  - Agent\r\n  - Edit\r\n---\r\n')).toEqual({ model: 'opus', isReadOnly: true })
+    expect(parseAgentDef('---\ntools: Read, Grep, Bash\n---\n').isReadOnly).toBe(true)
+    expect(parseAgentDef('---\ntools: Read, Edit\n---\n').isReadOnly).toBe(false)
   })
 
   test('changed files are the porcelain lines a snapshot did not have', () => {

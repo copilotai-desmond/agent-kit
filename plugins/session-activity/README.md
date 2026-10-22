@@ -7,9 +7,11 @@ A Claude Code pane beside the chat that shows what the session is doing. `/activ
   - the `STATUS` verdict its final report ends with
   - a warning when it ran on another model or effort than its agent definition asks for
   - a warning when an agent whose definition forbids editing finished with new changes in the working tree
-  - an escalation line when the same description was spawned again after an earlier run ended
+  - an escalation line when the same description was spawned again, on another model or effort, after an earlier run ended
+
+Agent definitions are read from `<type>.md` in the project's `.claude/agents/` and in `~/.claude/agents/`. Plugin agents, files in subfolders and files named differently from their `name` get no routing check or read-only guard.
 - **Servers and scripts.** Background commands with ports, CPU and memory, stop buttons and orphan cleanup.
-- **Spend.** Subagent tokens summed per model.
+- **Spend.** Tokens of every subagent turn, summed per model. Clearing finished rows keeps the totals.
 
 The status line carries the todo progress and the running counts.
 
