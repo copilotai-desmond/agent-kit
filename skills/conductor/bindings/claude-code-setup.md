@@ -7,7 +7,7 @@ Read only during `/conductor setup`.
 - The user-level instruction file is `~/.claude/CLAUDE.md`. Create it if missing.
 - In headless `-p` mode, setup needs permission to read the skill folder and write the files above. Without it, setup stops and writes nothing.
 - The skill is discoverable from any repo when `SKILL.md` exists at `~/.claude/skills/conductor/` or `~/.agents/skills/conductor/`.
-- Install every file in `claude-code-agents/` to `~/.claude/agents/`. A file that already matches stays. A file that differs is replaced. Leave every other file in that folder alone. If `~/.claude/agents/` did not exist when the session started, the harness sees the new agents only in a new session. Otherwise they load within seconds.
+- Install every file in `claude-code-agents/` to `~/.claude/agents/`. A file that already matches stays. A file that differs is replaced. Leave every other file in that folder alone. New agents usually load into the running session within seconds, even when the folder was just created. Observed on v2.1.308, 2026-10-22.
 
 ## Doctor
 
