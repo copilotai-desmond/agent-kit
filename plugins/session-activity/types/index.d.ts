@@ -56,6 +56,28 @@ export type Orphan = {
   command: string
 }
 
+export type TodoStatus = 'pending' | 'in_progress' | 'completed' | 'skipped'
+
+export type TodoItem = { content: string; status: TodoStatus; note?: string; startedAt?: number }
+
+export type TodoList = { title?: string; link?: string; items: TodoItem[] }
+
+export type Verdict = 'PASS' | 'PASS+NOTES' | 'ISSUES' | 'BLOCKED' | 'FAIL'
+
+export type SpawnInfo = {
+  todo?: string
+  wantModel?: string
+  wantEffort?: string
+  isReadOnly?: boolean
+  isolation?: string
+  verdict?: Verdict
+  escalatedFrom?: string
+  treeBefore?: string[]
+  changedFiles?: number
+}
+
+export type BranchHealth = { branch: string; trunk?: string; behind?: number; changed: number; pr?: number }
+
 declare module 'claude-code' {
   interface PluginState {
     'session-activity': {
@@ -66,6 +88,9 @@ declare module 'claude-code' {
       confirm: string
       expanded: string[]
       rootPid: number
+      todos: TodoList
+      spawns: Record<string, SpawnInfo>
+      branch: BranchHealth
     }
   }
 }

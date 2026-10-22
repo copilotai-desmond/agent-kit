@@ -1,4 +1,4 @@
-import type { AgentRow, AgentStatusWord, Orphan, ShellTask } from '../types'
+import type { AgentMetrics, AgentRow, AgentStatusWord, Orphan, ShellTask, TodoItem, TodoList, Verdict } from '../types'
 
 export type ProcRow = { pid: number; ppid: number; pgid: number; cpu: number; rssKb: number; args: string }
 
@@ -307,3 +307,58 @@ export const usageTokens = (u: {
   cache_read_input_tokens: number
   cache_creation_input_tokens: number
 }) => u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
+
+const TODO_STATUSES: readonly string[] = ['pending', 'in_progress', 'completed', 'skipped']
+
+export type TodoInput = { title?: string; link?: string; items: Pick<TodoItem, 'content' | 'status' | 'note'>[] }
+
+export function todoInputError(input: Record<string, unknown>): string | undefined {
+  if (!Array.isArray(input.items)) return '`items` must be an array of { content, status, note? }'
+  for (const [i, item] of input.items.entries()) {
+    if (typeof item?.content !== 'string' || item.content.trim() === '') return `items[${i}].content must be non-empty text`
+    if (!TODO_STATUSES.includes(item.status)) return `items[${i}].status must be one of ${TODO_STATUSES.join(', ')}`
+  }
+  return undefined
+}
+
+export function applyTodos(prev: TodoList | undefined, input: TodoInput, now: number): TodoList {
+  const items = input.items.map(({ content, status, note }) => {
+    const startedAt = status === 'pending' ? undefined : (prev?.items.find(p => p.content === content)?.startedAt ?? (status === 'in_progress' ? now : undefined))
+    return { content, status, ...(note ? { note } : {}), ...(startedAt === undefined ? {} : { startedAt }) }
+  })
+  return { ...(input.title ? { title: input.title } : {}), ...(input.link ? { link: input.link } : {}), items }
+}
+
+export function currentTodo(list: TodoList): string | undefined {
+  const active = list.items.filter(i => i.status === 'in_progress')
+  return active.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))[0]?.content
+}
+
+// The report shape conductor's delegates end with: `STATUS  PASS | ISSUES | BLOCKED`, or a verifier's FAIL.
+export const parseVerdict = (answer: string) =>
+  /^[*_\s]*STATUS[*_:\s]+(PASS\+NOTES|PASS|ISSUES|BLOCKED|FAIL)\b/m.exec(answer)?.[1] as Verdict | undefined
+
+export function parseAgentDef(text: string): { model?: string; effort?: string; isReadOnly: boolean } {
+  const front = /^---\n([\s\S]*?)\n---/.exec(text)?.[1] ?? ''
+  const field = (name: string) => new RegExp(`^${name}:\\s*(.+)$`, 'm').exec(front)?.[1]?.trim()
+  const model = field('model')
+  const effort = field('effort')
+  const isReadOnly = /\b(Edit|Write)\b/.test(field('disallowedTools') ?? '')
+  return { ...(model ? { model } : {}), ...(effort ? { effort } : {}), isReadOnly }
+}
+
+export const modelMatches = (want: string, ran: string) => want === 'inherit' || ran.includes(want)
+
+export function spendByModel(metrics: Record<string, AgentMetrics>): [string, number][] {
+  const sums = new Map<string, number>()
+  for (const m of Object.values(metrics)) {
+    if (!m.model || m.tokens <= 0) continue
+    const name = formatModel(m.model)
+    sums.set(name, (sums.get(name) ?? 0) + m.tokens)
+  }
+  return [...sums].sort((a, b) => b[1] - a[1])
+}
+
+export const porcelainLines = (stdout: string) => stdout.split('\n').filter(Boolean)
+
+export const newChanges = (before: readonly string[], stdout: string) => porcelainLines(stdout).filter(l => !before.includes(l)).length

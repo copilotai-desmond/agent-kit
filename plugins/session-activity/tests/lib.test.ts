@@ -26,6 +26,14 @@ import {
   parseTaskNotifications,
   summarizeToolUse,
   treeOf,
+  applyTodos,
+  currentTodo,
+  todoInputError,
+  parseVerdict,
+  parseAgentDef,
+  modelMatches,
+  spendByModel,
+  newChanges,
 } from '../hooks/lib'
 
 const PS = [
@@ -235,5 +243,79 @@ describe('row labels for long commands', () => {
     const e2e = `uptime; cd /workspace/.worktrees/rd-446-editor && pnpm test:e2e:chromium e2e/a.spec.ts > ${SCRATCH}/487-e2e-2.log 2>&1; echo EXIT $?`
     expect(summarizeCommand(e2e)).toBe('uptime; cd rd-446-editor && pnpm test:e2e:chromium e2e/a.spec.ts > scratch/487-e2e-2.log; echo EXIT $?')
     expect(summarizeCommand("cd /workspace/.worktrees/rd-443-runs/apps/web && python3 - <<'E'\nprint(1)\nE")).toBe("cd rd-443-runs/apps/web && python3 - <<'E'")
+  })
+})
+
+describe('todos', () => {
+  test('an item keeps when it started across replacements, matched by its text', () => {
+    const first = applyTodos(undefined, { items: [{ content: 'Map', status: 'in_progress' }] }, 100)
+    const second = applyTodos(first, { title: 'feature', items: [{ content: 'Map', status: 'in_progress' }, { content: 'Build', status: 'pending' }] }, 500)
+    expect(second.title).toBe('feature')
+    expect(second.items[0]?.startedAt).toBe(100)
+    expect(second.items[1]?.startedAt).toBeUndefined()
+  })
+
+  test('an item that goes back to pending forgets when it started', () => {
+    const first = applyTodos(undefined, { items: [{ content: 'Map', status: 'in_progress' }] }, 100)
+    expect(applyTodos(first, { items: [{ content: 'Map', status: 'pending' }] }, 500).items[0]?.startedAt).toBeUndefined()
+  })
+
+  test('a spawn belongs to the in-progress item started last', () => {
+    const list = applyTodos(
+      applyTodos(undefined, { items: [{ content: 'A', status: 'in_progress' }, { content: 'B', status: 'pending' }] }, 100),
+      { items: [{ content: 'A', status: 'in_progress' }, { content: 'B', status: 'in_progress' }] },
+      200,
+    )
+    expect(currentTodo(list)).toBe('B')
+    expect(currentTodo(applyTodos(undefined, { items: [{ content: 'A', status: 'completed' }] }, 1))).toBeUndefined()
+  })
+
+  test('invalid input names what is wrong', () => {
+    expect(todoInputError({ items: 'x' })).toMatch(/items/)
+    expect(todoInputError({ items: [{ content: 'a', status: 'done' }] })).toMatch(/status/)
+    expect(todoInputError({ items: [{ content: '', status: 'pending' }] })).toMatch(/content/)
+    expect(todoInputError({ items: [{ content: 'a', status: 'skipped', note: 'n/a' }], title: 'feature' })).toBeUndefined()
+  })
+})
+
+describe('delegates', () => {
+  test('the STATUS line of a report gives the verdict', () => {
+    expect(parseVerdict('STATUS     PASS+NOTES\nDID  x')).toBe('PASS+NOTES')
+    expect(parseVerdict('notes\nSTATUS: ISSUES\n')).toBe('ISSUES')
+    expect(parseVerdict('**STATUS** FAIL')).toBe('FAIL')
+    expect(parseVerdict('all good')).toBeUndefined()
+  })
+
+  test('an agent definition gives its model, effort and whether it may write', () => {
+    const def = parseAgentDef('---\nname: conductor-explorer\nmodel: haiku\neffort: low\ndisallowedTools: Agent, Edit, Write, NotebookEdit\n---\nbody model: opus')
+    expect(def).toEqual({ model: 'haiku', effort: 'low', isReadOnly: true })
+    expect(parseAgentDef('---\nmodel: sonnet\ndisallowedTools: Agent\n---\n').isReadOnly).toBe(false)
+    expect(parseAgentDef('no frontmatter')).toEqual({ isReadOnly: false })
+  })
+
+  test('an alias matches any model id of its family', () => {
+    expect(modelMatches('haiku', 'claude-haiku-5-5')).toBe(true)
+    expect(modelMatches('opus', 'claude-sonnet-5-5')).toBe(false)
+    expect(modelMatches('claude-opus-5-5', 'claude-opus-5-5[1m]')).toBe(true)
+    expect(modelMatches('inherit', 'claude-sonnet-5-5')).toBe(true)
+  })
+
+  test('spend sums tokens per model, largest first', () => {
+    expect(
+      spendByModel({
+        a: { toolUses: 0, tokens: 1000, activity: [], model: 'claude-haiku-5-5' },
+        b: { toolUses: 0, tokens: 5000, activity: [], model: 'claude-opus-5-5' },
+        c: { toolUses: 0, tokens: 500, activity: [], model: 'claude-haiku-5-5' },
+        d: { toolUses: 0, tokens: 0, activity: [] },
+      }),
+    ).toEqual([
+      ['Opus 5.5', 5000],
+      ['Haiku 5.5', 1500],
+    ])
+  })
+
+  test('changed files are the porcelain lines a snapshot did not have', () => {
+    expect(newChanges([' M a.ts'], ' M a.ts\n?? b.ts\n M c.ts\n')).toBe(2)
+    expect(newChanges([], '')).toBe(0)
   })
 })
