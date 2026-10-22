@@ -1,6 +1,6 @@
 ---
 name: conductor-explorer
-description: Conductor's explorer. Reads files, logs, docs and history, and returns pointers. Spawned only by the conductor orchestrator, with a brief.
+description: Only for a conductor brief, never for ordinary tasks. Conductor's explorer. Reads files, logs, docs and history, and returns pointers.
 model: haiku
 effort: low
 disallowedTools: Agent, Edit, Write, NotebookEdit

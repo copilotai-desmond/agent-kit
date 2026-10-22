@@ -19,7 +19,7 @@ Claude Code has one model family. Spawn reviewers and verifiers fresh at their o
 
 | Verb | Mechanism | Fallback |
 |---|---|---|
-| spawn | `Agent` tool with `prompt` (the brief), `description`, `model`, `effort`, `subagent_type` | None. Always available |
+| spawn | `Agent` tool with `prompt` (the brief), `description` and `subagent_type`. Add `model` and `effort` only to escalate or on the fallback path | None. Always available |
 | fork | `Agent` with `subagent_type: "fork"`. Inherits the conversation, system prompt, model and prompt cache | If fork is unavailable, spawn with a full brief |
 | continue | `SendMessage` to the delegate's id | Spawn fresh with the consolidated scope |
 | ask | `AskUserQuestion` with options | In `-p` mode the tool is absent. Ask in plain text, list the options, and stop |
@@ -45,14 +45,13 @@ Spawn each role as its role agent. Setup installs them from `claude-code-agents/
 
 To escalate, pass both `model` and `effort` from the tier table. A per-spawn `model` replaces the agent's model, but the agent's `effort` stays unless you pass one.
 
-If `subagent_type` is unknown, the role agents are not installed. Tell the operator to run `/conductor setup`, then use the fallback type, pass `model` and `effort` on every spawn, and paste the role's rules and report shape from roles.md into the brief.
+If `subagent_type` is unknown, the role agents are not installed. Tell the operator to run `/conductor setup`, then use the fallback type, pass `model` and `effort` on every spawn, and paste the body of `claude-code-agents/conductor-<role>.md` (everything below its frontmatter) into the brief.
 
-Explorers and reviewers cannot edit or write files but can still run shell commands. After one returns, run `git status` and treat any change as a failed gate.
+The explorer, reviewer and verifier agents cannot edit or write files but can still run shell commands. After one of them, or any fallback spawn of those roles, returns, run `git status` and treat any change as a failed gate.
 
 Every delegate that writes while another writes gets `isolation: "worktree"`. Disjoint paths in one tree still share the git index.
 
 Delegates run in the background and notify on completion. Do not poll. Start the independent ones in one message so they run together.
-
 
 ## Pitfalls
 

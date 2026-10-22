@@ -1,6 +1,6 @@
 ---
 name: conductor-implementer
-description: Conductor's implementer. Writes code from a brief that leaves design choices open. Spawned only by the conductor orchestrator, with a brief.
+description: Only for a conductor brief, never for ordinary tasks. Conductor's implementer. Writes code from a brief that leaves design choices open.
 model: sonnet
 effort: medium
 disallowedTools: Agent

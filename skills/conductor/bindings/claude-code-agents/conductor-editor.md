@@ -1,6 +1,6 @@
 ---
 name: conductor-editor
-description: Conductor's editor. Applies a brief with nothing left to decide, or runs a command and reports. Spawned only by the conductor orchestrator, with a brief.
+description: Only for a conductor brief, never for ordinary tasks. Conductor's editor. Applies a brief with nothing left to decide, or runs a command and reports.
 model: haiku
 effort: low
 disallowedTools: Agent

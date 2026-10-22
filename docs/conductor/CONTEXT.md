@@ -89,11 +89,11 @@ The mapping, for one harness, from tiers to concrete models and efforts, and fro
 _Avoid_: Adapter, config, provider file
 
 **Role agent**:
-An agent definition a binding ships for one delegate role, carrying the role's default tier and the tools it may not use.
+An agent definition a binding ships for one delegate role, carrying the role's default tier, the tools it may not use, its rules and the report shape.
 _Avoid_: Tier agent, custom agent, subagent type
 
 **Doctor**:
-The check that spawns each tier in a harness and confirms the model that actually ran, so a silent fallback is caught.
+The check that spawns each role agent in a harness and confirms the model and effort that actually ran, so a silent fallback is caught.
 _Avoid_: Health check, smoke test
 
 ## Quality
