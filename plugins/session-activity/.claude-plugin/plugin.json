@@ -1,0 +1,36 @@
+{
+  "name": "session-activity",
+  "version": "0.1.0",
+  "description": "A pane of this session's subagents and background servers and scripts, with ports, CPU and memory, stop and orphan cleanup",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "onExit": {
+      "type": "string",
+      "title": "On session exit",
+      "description": "What to do with background servers and orphaned processes still running when the session ends",
+      "options": [
+        "stop",
+        "leave"
+      ],
+      "default": "stop"
+    },
+    "notifyAfterSeconds": {
+      "type": "number",
+      "title": "Notify after (seconds)",
+      "description": "Send a notification when a background script that ran at least this long finishes; 0 turns it off",
+      "default": 30
+    },
+    "quietMinutes": {
+      "type": "number",
+      "title": "Flag quiet scripts after (minutes)",
+      "description": "Mark a running script with no listening port as quiet when it has printed nothing for this long",
+      "default": 5
+    },
+    "clearFinishedAfterMinutes": {
+      "type": "number",
+      "title": "Clear finished after (minutes)",
+      "description": "Remove completed and stopped scripts from the pane this long after they end; failed ones stay until cleared. 0 keeps them all",
+      "default": 2
+    }
+  }
+}

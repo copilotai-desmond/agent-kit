@@ -1,0 +1,239 @@
+import { describe, expect, test } from 'claude-code/testing'
+
+import type { ShellTask } from '../types'
+
+import {
+  shortenPaths,
+  summarizeCommand,
+  cpuSince,
+  parseProcStat,
+  exitCodeOf,
+  readTail,
+  expireFinished,
+  mergeScan,
+  reconcileRunning,
+  findSessionRoot,
+  findTaskShell,
+  formatDuration,
+  formatModel,
+  lastLine,
+  mergeAgents,
+  orphansOf,
+  parseLsof,
+  parseOutputPath,
+  parsePs,
+  parseSs,
+  parseTaskNotifications,
+  summarizeToolUse,
+  treeOf,
+} from '../hooks/lib'
+
+const PS = [
+  '    1     0     1  0.0  1200 /sbin/init',
+  '  100     1   100  1.0 90000 claude --dangerously-skip-permissions',
+  `  200   100   200  0.0  3000 /bin/bash -c source /x/snapshot.sh && eval 'pnpm dev' < /dev/null && pwd -P`,
+  '  201   200   200  2.5 40000 node /repo/node_modules/.bin/next dev',
+  '  202   201   200 12.0 300000 next-server (v16.0.0)',
+  `  300   100   300  0.0  3000 /bin/bash -c eval 'echo '"'"'hi'"'"''`,
+].join('\n')
+
+describe('process table', () => {
+  const rows = parsePs(PS)
+
+  test('parses every row with its args intact', () => {
+    expect(rows.length).toBe(6)
+    expect(rows[4]).toEqual({ pid: 202, ppid: 201, pgid: 200, cpu: 12, rssKb: 300000, args: 'next-server (v16.0.0)' })
+  })
+
+  test('finds the claude process above a helper', () => {
+    expect(findSessionRoot(rows, 100)).toBe(100)
+  })
+
+  test('stops at the versioned binary a daemon session runs, not the pty host above it', () => {
+    const daemon = parsePs([
+      '  700     1   700  0.0  9000 claude bg-pty-host --bg-pty-host /tmp/p.sock 200 50 -- /home/u/.local/share/claude/versions/2.1.308 --session-id s',
+      '  710   700   710  1.0 90000 /home/u/.local/share/claude/versions/2.1.308 --session-id s --resume /x.jsonl',
+      '   50   710    50  0.0   100 sh -c ps',
+    ].join('\n'))
+    expect(findSessionRoot(daemon, 50)).toBe(710)
+  })
+
+  test('matches a task to its wrapper shell, quoting included', () => {
+    expect(findTaskShell(rows, 100, 'pnpm dev', new Set())?.pid).toBe(200)
+    expect(findTaskShell(rows, 100, "echo 'hi'", new Set())?.pid).toBe(300)
+    expect(findTaskShell(rows, 100, 'pnpm dev', new Set([200]))).toBeUndefined()
+  })
+
+  test('walks the whole process tree of a task', () => {
+    expect(treeOf(rows, 200, 200).map(r => r.pid)).toEqual([200, 201, 202])
+  })
+
+  test('flags group members that outlived the shell as orphans', () => {
+    const survivors = parsePs(PS).filter(r => r.pid !== 200 && r.pid !== 201)
+    const orphans = orphansOf(
+      survivors,
+      { id: 'b1', kind: 'shell', command: 'pnpm dev', startedAt: 0, status: 'killed', shellPid: 200, pgid: 200, pids: [200, 201, 202], ports: [], cpu: 0, rssKb: 0 },
+      new Map([[202, [3000]]]),
+    )
+    expect(orphans).toEqual([{ pid: 202, args: 'next-server (v16.0.0)', ports: [3000], taskId: 'b1', command: 'pnpm dev' }])
+  })
+})
+
+describe('listening ports', () => {
+  test('reads ss output', () => {
+    const ss = 'LISTEN 0 511 *:3000 *:* users:(("next-server (v1",pid=202,fd=21))\nLISTEN 0 4096 [::1]:5432 [::]:* users:(("postgres",pid=9,fd=7))'
+    expect(parseSs(ss)).toEqual(new Map([[202, [3000]], [9, [5432]]]))
+  })
+
+  test('reads lsof output', () => {
+    expect(parseLsof('p202\nf21\nn*:3000\nn[::1]:3001\np9\nn127.0.0.1:5432')).toEqual(new Map([[202, [3000, 3001]], [9, [5432]]]))
+  })
+})
+
+describe('notifications and output', () => {
+  test('parses a task notification with its exit code', () => {
+    const text = [
+      '<task-notification>',
+      '<task-id>bf7hyalsl</task-id>',
+      '<output-file>/var/tmp/x/tasks/bf7hyalsl.output</output-file>',
+      '<status>completed</status>',
+      '<summary>Background command "Run tests" completed (exit code 1)</summary>',
+      '</task-notification>',
+    ].join('\n')
+    expect(parseTaskNotifications(text)).toEqual([
+      { taskId: 'bf7hyalsl', status: 'completed', exitCode: 1, outputPath: '/var/tmp/x/tasks/bf7hyalsl.output' },
+    ])
+  })
+
+  test('reads the output path from a background Bash result', () => {
+    expect(parseOutputPath('Command running in background with ID: b1. Output is being written to: /t/tasks/b1.output')).toBe('/t/tasks/b1.output')
+  })
+
+  test('takes the last visible line, colours and progress rewrites stripped', () => {
+    expect(lastLine('one\n\x1b[32m✓ Compiled\x1b[0m\nwait 10%\rwait 90%\n\n')).toBe('wait 90%')
+  })
+
+  test('formats durations the way /tasks does', () => {
+    expect(formatDuration(12_400)).toBe('12s')
+    expect(formatDuration(134_000)).toBe('2m14s')
+    expect(formatDuration(3_780_000)).toBe('1h03m')
+  })
+
+  test('summarizes a tool use as its most telling argument', () => {
+    expect(summarizeToolUse('Read', { file_path: '/repo/apps/web/page.tsx' })).toBe('Read: page.tsx')
+    expect(summarizeToolUse('Bash', { command: 'pnpm test\n--watch' })).toBe('Bash: pnpm test')
+  })
+})
+
+describe('agents', () => {
+  test('keeps a finished agent after the engine drops it, stamped with when it ended', () => {
+    const first = mergeAgents([], [{ id: 'a1', type: 'Explore', description: 'Find callers', status: 'running' }], 1000)
+    const second = mergeAgents(first, [], 5000)
+    expect(second).toEqual([{ id: 'a1', type: 'Explore', description: 'Find callers', status: 'completed', firstSeenAt: 1000, endedAt: 5000 }])
+  })
+})
+
+describe('model label', () => {
+  test('shortens model ids the way people say them', () => {
+    expect(formatModel('claude-opus-5-5[1m]')).toBe('Opus 5.5')
+    expect(formatModel('claude-sonnet-5-5')).toBe('Sonnet 5.5')
+    expect(formatModel('claude-haiku-4-5-20251001')).toBe('Haiku 4.5')
+    expect(formatModel('claude-fable-5-1')).toBe('Fable 5.1')
+    expect(formatModel('us.anthropic.claude-opus-5-5')).toBe('Opus 5.5')
+    expect(formatModel('some-gateway-model')).toBe('some-gateway-model')
+  })
+})
+
+describe('finished scripts', () => {
+  const task = (id: string, status: ShellTask['status'], endedAt?: number): ShellTask => ({
+    id, kind: 'shell', command: id, startedAt: 0, status, endedAt, pids: [], ports: [], cpu: 0, rssKb: 0,
+  })
+
+  test('a scan never resurrects a cleared row or undoes an end that landed meanwhile', () => {
+    const scanned = [{ ...task('a', 'running'), cpu: 9 }, { ...task('b', 'running'), cpu: 5 }, { ...task('c', 'running'), cpu: 1 }]
+    const current = [task('b', 'completed', 100), task('c', 'running'), task('d', 'running')]
+    expect(mergeScan(current, scanned).map(s => [s.id, s.status, s.cpu])).toEqual([
+      ['b', 'completed', 0],
+      ['c', 'running', 1],
+      ['d', 'running', 0],
+    ])
+  })
+
+  test('completed and stopped rows expire; failed and running ones stay', () => {
+    const list = [task('done', 'completed', 0), task('stopped', 'killed', 0), task('broke', 'failed', 0), task('fresh', 'completed', 100_000), task('live', 'running')]
+    expect(expireFinished(list, 120_000, 120_000).map(s => s.id)).toEqual(['broke', 'fresh', 'live'])
+    expect(expireFinished(list, 120_000, 0).length).toBe(5)
+  })
+
+  test('a running row the engine no longer lists as in flight is marked ended', () => {
+    const out = reconcileRunning([task('gone', 'running'), task('live', 'running')], new Set(['live']), 50)
+    expect(out.map(s => [s.id, s.status, s.endedAt])).toEqual([
+      ['gone', 'exited', 50],
+      ['live', 'running', undefined],
+    ])
+  })
+})
+
+describe('exit marker', () => {
+  test('reads the exit code the Bash tool writes last, and the line before it', () => {
+    expect(readTail('compiling\nerror TS2345\n\n[exited with code 8]\n')).toEqual({ line: 'error TS2345', exitCode: 8 })
+    expect(readTail('still going\n')).toEqual({ line: 'still going', exitCode: undefined })
+    expect(exitCodeOf('[exited with code 0]')).toBe(0)
+    expect(exitCodeOf('echo [exited with code 0]')).toBeUndefined()
+  })
+})
+
+describe('linking a task to its processes', () => {
+  const rows = parsePs([
+    '  100     1   100  1.0 90000 claude --dangerously-skip-permissions',
+    '  150     1   150  1.0 90000 claude --resume',
+    `  200   100   200  0.0  3000 /bin/bash -c source /s.sh && eval 'pnpm dev' < /dev/null && pwd -P`,
+    `  250   150   250  0.0  3000 /bin/bash -c source /s.sh && eval 'pnpm dev' < /dev/null && pwd -P`,
+    `  300   100   300  0.0  3000 /bin/bash -c source /s.sh && eval 'cat > x <<EOF\npnpm dev\nEOF' < /dev/null`,
+  ].join('\n'))
+
+  test("claims this session's shell, never another session's running the same command", () => {
+    expect(findTaskShell(rows, 100, 'pnpm dev', new Set())?.pid).toBe(200)
+    expect(findTaskShell(rows, 100, 'pnpm dev', new Set([200]))).toBeUndefined()
+    expect(findTaskShell(rows, 0, 'pnpm dev', new Set())).toBeUndefined()
+  })
+
+  test('ignores a shell that only mentions the command', () => {
+    expect(findTaskShell(rows, 100, 'npm dev', new Set())).toBeUndefined()
+  })
+})
+
+describe('current CPU', () => {
+  test('reads utime and stime past a command name holding spaces and parens', () => {
+    const stat = '42 (next-server (v16)) S 1 42 42 0 -1 4194560 100 0 0 0 250 50 0 0 20 0 11 0 1 2 3'
+    expect(parseProcStat(stat)).toEqual(new Map([[42, 300]]))
+  })
+
+  test('is the ticks spent over the interval, one busy core being 100%', () => {
+    const before = new Map([[1, 1000], [2, 50]])
+    const after = new Map([[1, 1200], [2, 50], [3, 999]])
+    expect(cpuSince(before, after, [1, 2, 3], 2000)).toBe(100)
+  })
+})
+
+describe('row labels for long commands', () => {
+  const SCRATCH = '/var/tmp/claude-1000/-workspace--worktrees-implement-github-project-4/371a09cf-12d5-46cd-aae1-808ea9da5fc6/scratchpad'
+
+  test('shortens scratchpad, worktree and home paths', () => {
+    expect(shortenPaths(`cat ${SCRATCH}/487-e2e-2.log`)).toBe('cat scratch/487-e2e-2.log')
+    expect(shortenPaths('cd /workspace/.worktrees/rd-441-releases/apps/web')).toBe('cd rd-441-releases/apps/web')
+    expect(shortenPaths('ls /home/node/.claude/mods')).toBe('ls ~/.claude/mods')
+  })
+
+  test('names a wait loop by what it waits for', () => {
+    const monitor = `until grep -q '^DONE' ${SCRATCH}/e2e-443c.log 2>/dev/null; do sleep 10; done; grep -n " passed" ${SCRATCH}/e2e-443c.log | head -40`
+    expect(summarizeCommand(monitor)).toBe('wait for DONE in scratch/e2e-443c.log')
+    expect(summarizeCommand(`until grep -q "EXIT" ${SCRATCH}/487-e2e-2.log; do sleep 5; done`)).toBe('wait for EXIT in scratch/487-e2e-2.log')
+  })
+
+  test('keeps the first line of anything else, with redirections dropped', () => {
+    const e2e = `uptime; cd /workspace/.worktrees/rd-446-editor && pnpm test:e2e:chromium e2e/a.spec.ts > ${SCRATCH}/487-e2e-2.log 2>&1; echo EXIT $?`
+    expect(summarizeCommand(e2e)).toBe('uptime; cd rd-446-editor && pnpm test:e2e:chromium e2e/a.spec.ts > scratch/487-e2e-2.log; echo EXIT $?')
+    expect(summarizeCommand("cd /workspace/.worktrees/rd-443-runs/apps/web && python3 - <<'E'\nprint(1)\nE")).toBe("cd rd-443-runs/apps/web && python3 - <<'E'")
+  })
+})
