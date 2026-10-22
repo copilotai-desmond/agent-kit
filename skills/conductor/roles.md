@@ -6,7 +6,7 @@ Playbooks name roles. This table gives each role its tier. Your binding gives ea
 |---|---|---|---|
 | orchestrator | session model | Runs the playbook, writes briefs, owns verdicts | None. It is you |
 | explorer | bulk-read | Reads files, logs, docs and history. Returns pointers, never conclusions | Every pointer resolves and every quote exists |
-| implementer | strong-code | Writes code from a brief that leaves design choices open | Tests and typecheck, then a reviewer |
+| implementer | strong-code | Writes code from a brief that leaves design choices open. Failing test first where the repo has a test harness | Tests and typecheck, then a reviewer |
 | editor | mechanical | Applies a brief with nothing left to decide, or runs a command and reports the result | Lint, typecheck, tests, or a diff limited to the named files |
 | reviewer | frontier | Reads a diff against the intent and the repo's standards, without running it | None. Judgment |
 | verifier | frontier | Runs the change on the real artifact and reports pass or fail with evidence | None. Judgment |
@@ -41,7 +41,7 @@ GATE        the exact command that proves it, and known traps
 REPORT      the shape below
 ```
 
-Size the brief to the work. A one-command job gets a paragraph that still names goal, scope, gate and report. A brief that costs more than the work means do the work yourself.
+Size the brief to the work. A one-command job gets a paragraph that still names goal, scope, gate and report. Omit REPORT when your binding's role agent already carries the report shape. A brief that costs more than the work means do the work yourself.
 
 ## The report
 
@@ -54,6 +54,8 @@ EVIDENCE   the gate's command and its result, quoted
 FINDINGS   pointers (path:line) with one line each
 OPEN       what it could not settle, and why
 ```
+
+A verifier's STATUS carries its verdict instead: PASS, PASS+NOTES, FAIL or BLOCKED.
 
 A delegate that can prove a problem reports ISSUES and lists every problem it can prove, not only the first.
 

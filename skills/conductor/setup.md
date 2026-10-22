@@ -13,7 +13,7 @@ Writing the operator's instruction file is reversible and is the whole purpose o
    - The file is missing. Create it with the block.
    - A lone marker or more than one block. Stop and show the operator the lines. Do not guess.
    - Never touch anything outside the markers.
-4. **Install tier agents.** Only if the binding lists them. Install any that are missing or differ. Skip ones that are already correct. If the binding lists none, say so.
+4. **Install agent files.** Only if the binding lists them. Install any that are missing or differ. Skip ones that are already correct. If the binding lists none, say so.
 5. **Run the doctor.** Run the binding's doctor recipe. Keep its table.
 6. **Reply.** Lead with whether routing works. Then list what was written, what was already correct, and the doctor table. Include the diff of the instruction file. Name every mismatch the doctor found and its likely cause.
 

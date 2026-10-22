@@ -19,7 +19,7 @@ Claude Code has one model family. Spawn reviewers and verifiers fresh at their o
 
 | Verb | Mechanism | Fallback |
 |---|---|---|
-| spawn | `Agent` tool with `prompt` (the brief), `description`, `model`, `effort`, `subagent_type` | None. Always available |
+| spawn | `Agent` tool with `prompt` (the brief), `description` and `subagent_type`. Add `model` and `effort` only to escalate or on the fallback path | None. Always available |
 | fork | `Agent` with `subagent_type: "fork"`. Inherits the conversation, system prompt, model and prompt cache | If fork is unavailable, spawn with a full brief |
 | continue | `SendMessage` to the delegate's id | Spawn fresh with the consolidated scope |
 | ask | `AskUserQuestion` with options | In `-p` mode the tool is absent. Ask in plain text, list the options, and stop |
@@ -33,27 +33,29 @@ Besides `AGENTS.md`, read `CLAUDE.md` and `.claude/skills/` in the repo.
 
 ## Spawning by role
 
-Always pass `model` and `effort` from the tier table. A call without them runs on the session model, which defeats routing.
+Spawn each role as its role agent. Setup installs them from `claude-code-agents/`. Each one carries its tier's model and effort, the tools its role may not use, its rules and the report shape, so the brief needs only GOAL, SCOPE, CONTEXT, ACCEPTANCE and GATE.
 
-| Role | `subagent_type` | Tier |
-|---|---|---|
-| explorer | `Explore` | bulk-read |
-| implementer | `general-purpose` | strong-code |
-| editor | `general-purpose` | mechanical |
-| reviewer | `general-purpose` | frontier |
-| verifier | `general-purpose` | frontier |
+| Role | `subagent_type` | Default tier | Without the role agent |
+|---|---|---|---|
+| explorer | `conductor-explorer` | bulk-read | `Explore` |
+| implementer | `conductor-implementer` | strong-code | `general-purpose` |
+| editor | `conductor-editor` | mechanical | `general-purpose` |
+| reviewer | `conductor-reviewer` | frontier | `general-purpose` |
+| verifier | `conductor-verifier` | frontier | `general-purpose` |
 
-`Explore` cannot write or edit files but can still run shell commands. Its brief says "do not edit or write anything". After it returns, run `git status` and treat any change as a failed gate.
+To escalate, pass both `model` and `effort` from the tier table. A per-spawn `model` replaces the agent's model, but the agent's `effort` stays unless you pass one.
+
+If `subagent_type` is unknown, the role agents are not installed. Tell the operator to run `/conductor setup`, then use the fallback type, pass `model` and `effort` on every spawn, and paste the body of `claude-code-agents/conductor-<role>.md` (everything below its frontmatter) into the brief.
+
+The explorer, reviewer and verifier agents cannot edit or write files but can still run shell commands. After one of them, or any fallback spawn of those roles, returns, run `git status` and treat any change as a failed gate.
 
 Every delegate that writes while another writes gets `isolation: "worktree"`. Disjoint paths in one tree still share the git index.
 
 Delegates run in the background and notify on completion. Do not poll. Start the independent ones in one message so they run together.
 
-Briefs for mechanical and bulk-read delegates say "do not consult the advisor. If stuck, report BLOCKED."
-
 ## Pitfalls
 
-- **The advisor tool.** Every delegate gets a built-in `advisor` tool that runs on `opus`. The delegate's own turns run on the requested model, but each advisor call spends frontier tokens. A UI may show the advisor model and make routing look broken when it is not. Observed on v2.1.302, 2026-10-17.
+- **The advisor tool.** Every delegate's request carries a built-in `advisor` tool on `opus`, deferred so the delegate must find it by search. A delegate's search does not find it, an agent file cannot remove it, and no delegate has called it. A UI may show the advisor model and make routing look broken when it is not. Briefs say nothing about it. The doctor and the routing log still count its calls, because a call would be frontier spend outside the escalation rule. Observed on v2.1.308, 2026-10-22.
 - **Silent override.** `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` makes every spawn ignore the requested `model` without a message. A per-spawn `model` beats plain `CLAUDE_CODE_SUBAGENT_MODEL`. Per the sub-agents docs, read 2026-10-17.
 - **Fork locks the model.** A fork runs on the session model and takes no `model` or `effort`. It saves context, not cost.
 - **Effort.** Per-spawn `effort` works on non-fork delegates. `CLAUDE_CODE_EFFORT_LEVEL` overrides it. Observed on v2.1.302, 2026-10-17.
