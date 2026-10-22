@@ -29,7 +29,7 @@ The plan, progress and pickup point of a piece of work: what is done, what is ne
 _Avoid_: Status, todos, progress notes
 
 **Tracker**:
-The issue tracker a repo declares. When one is declared it holds the work state, and the session's todo list only mirrors the current playbook's steps.
+The issue tracker a repo declares. When one is declared it holds the work state. The session's todo list holds the current playbook's steps and the todos found on the way, and links to the tracker's issue.
 _Avoid_: Board, backlog, ticket system
 
 ## Shipping
