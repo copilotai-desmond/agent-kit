@@ -88,9 +88,9 @@ _Avoid_: Level, size, budget
 The mapping, for one harness, from tiers to concrete models and efforts, and from conductor's abstract verbs to that harness's tools.
 _Avoid_: Adapter, config, provider file
 
-**Tier agent**:
-An agent definition file shipped for one tier in a harness that can set a model only per definition file, not per spawn.
-_Avoid_: Custom agent, subagent type
+**Role agent**:
+An agent definition a binding ships for one delegate role, carrying the role's default tier and the tools it may not use.
+_Avoid_: Tier agent, custom agent, subagent type
 
 **Doctor**:
 The check that spawns each tier in a harness and confirms the model that actually ran, so a silent fallback is caught.
@@ -113,7 +113,7 @@ _Avoid_: Guideline, best practice, value
 ## Configuration
 
 **Setup**:
-Conductor's own step that writes the always-on pointer into a harness's user-level instructions, installs any tier agents, and runs the doctor.
+Conductor's own step that writes the always-on pointer into a harness's user-level instructions, installs any role agents, and runs the doctor.
 _Avoid_: Install, bootstrap, init
 
 **Local overlay**:

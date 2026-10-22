@@ -6,11 +6,11 @@ Read only during `/conductor setup`.
 
 - The user-level instruction file is `~/.claude/CLAUDE.md`. Create it if missing.
 - The skill is discoverable from any repo when `SKILL.md` exists at `~/.claude/skills/conductor/` or `~/.agents/skills/conductor/`.
-- Tier agents are not needed. Per-spawn `model` and `effort` work, so setup installs none.
+- Install every file in `claude-code-agents/` to `~/.claude/agents/`. A file that already matches stays. A file that differs is replaced. Leave every other file in that folder alone. A new session is needed before the harness sees a newly installed agent.
 
 ## Doctor
 
-Spawn one tiny delegate per tier with that tier's `model` and `effort`, using `general-purpose`. Add one `Explore` probe on the bulk-read tier, since explorers spawn as `Explore`. Spawn them all in one message. Use this brief.
+Spawn each role agent once with no `model` or `effort`, so each runs on its own defaults. Add one `conductor-editor` probe with `model: sonnet` and `effort: medium` to prove escalation overrides the defaults. Spawn them all in one message. If a role agent is not found yet because it was just installed, say a new session is needed and run the doctor there. Use this brief.
 
 ```
 Do not edit anything. Do not consult the advisor. Reply with only the exact model name or ID stated in your system prompt.
@@ -30,5 +30,5 @@ A model that ran but differs from the request is a silent fallback. An alias tha
 
 Output this table.
 
-| Tier | Probe | Requested | Ran | Effort | Match | Advisor calls |
+| Role agent | Tier | Requested | Ran | Effort | Match | Advisor calls |
 |---|---|---|---|---|---|---|
