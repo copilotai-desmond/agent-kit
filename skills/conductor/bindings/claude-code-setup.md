@@ -5,6 +5,7 @@ Read only during `/conductor setup`.
 ## Setup data
 
 - The user-level instruction file is `~/.claude/CLAUDE.md`. Create it if missing.
+- In headless `-p` mode, setup needs permission to read the skill folder and write the files above. Without it, setup stops and writes nothing.
 - The skill is discoverable from any repo when `SKILL.md` exists at `~/.claude/skills/conductor/` or `~/.agents/skills/conductor/`.
 - Install every file in `claude-code-agents/` to `~/.claude/agents/`. A file that already matches stays. A file that differs is replaced. Leave every other file in that folder alone. If `~/.claude/agents/` did not exist when the session started, the harness sees the new agents only in a new session. Otherwise they load within seconds.
 
@@ -13,7 +14,7 @@ Read only during `/conductor setup`.
 Spawn each role agent once with no `model` or `effort`, so each runs on its own defaults. Add one `conductor-editor` probe with `model: sonnet` and `effort: medium` to prove escalation overrides the defaults. Spawn them all in one message. If a role agent is not found because it was just installed, stop and tell the operator to start a new session and run `/conductor setup` again. Install will find every file matching, and the doctor runs there. Use this brief.
 
 ```
-Put the exact model name or ID stated in your system prompt on the DID line. There is no gate.
+GOAL: report which model you run on. Put the exact model name or ID stated in your system prompt on the DID line and report PASS. There is no gate and nothing to decide.
 ```
 
 The reply is a claim. Confirm each probe from its files under `~/.claude/projects/<slug>/<session>/subagents/`. The slug is the workspace path with every character that is not a letter or digit replaced by `-`.
