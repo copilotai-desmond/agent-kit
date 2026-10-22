@@ -23,7 +23,7 @@ Claude Code has one model family. Spawn reviewers and verifiers fresh at their o
 | fork | `Agent` with `subagent_type: "fork"`. Inherits the conversation, system prompt, model and prompt cache | If fork is unavailable, spawn with a full brief |
 | continue | `SendMessage` to the delegate's id | Spawn fresh with the consolidated scope |
 | ask | `AskUserQuestion` with options | In `-p` mode the tool is absent. Ask in plain text, list the options, and stop |
-| track | The session's todo or task tool | If none exists, keep the list in the reply and restate it when it changes |
+| track | The session's todo tool: a built-in todo or task tool, or a tool a plugin adds whose description says it holds the todo list. Pass the playbook's name as its title and the tracker issue's URL as its link where it takes them. Mark a skipped step with the tool's skipped status when it has one, else as completed with `skip: <reason>` in its text | If none exists, keep the list in the reply and restate it when it changes |
 | show | Mermaid in the reply for flows. For a mockup, write a throwaway HTML file and publish it with the `Artifact` tool. Screenshots by path | Without `Artifact`, give the file path |
 | isolate | `Agent` with `isolation: "worktree"` | Tell the delegate to `git worktree add` its own path and stay inside it |
 
@@ -43,7 +43,7 @@ Spawn each role as its role agent. Setup installs them from `claude-code-agents/
 | reviewer | `conductor-reviewer` | frontier | `general-purpose` |
 | verifier | `conductor-verifier` | frontier | `general-purpose` |
 
-To escalate, pass both `model` and `effort` from the tier table. A per-spawn `model` replaces the agent's model, but the agent's `effort` stays unless you pass one.
+To escalate, pass both `model` and `effort` from the tier table, and keep the spawn's `description` unchanged so the retry reads as the same piece of work. A per-spawn `model` replaces the agent's model, but the agent's `effort` stays unless you pass one.
 
 If `subagent_type` is unknown, the role agents are not installed. Tell the operator to run `/conductor setup`, then use the fallback type, pass `model` and `effort` on every spawn, and paste the body of `claude-code-agents/conductor-<role>.md` (everything below its frontmatter) into the brief.
 
