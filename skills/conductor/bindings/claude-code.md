@@ -55,7 +55,7 @@ Delegates run in the background and notify on completion. Do not poll. Start the
 
 ## Pitfalls
 
-- **The advisor tool.** Every delegate gets a built-in `advisor` tool that runs on `opus`. The delegate's own turns run on the requested model, but each advisor call spends frontier tokens. A UI may show the advisor model and make routing look broken when it is not. An agent file cannot remove it, even with `disallowedTools`, so the explorer and editor agents tell the delegate not to consult it. Observed on v2.1.308, 2026-10-22.
+- **The advisor tool.** Every delegate's request carries a built-in `advisor` tool on `opus`, deferred so the delegate must find it by search. A delegate's search does not find it, an agent file cannot remove it, and no delegate has called it. A UI may show the advisor model and make routing look broken when it is not. Briefs say nothing about it. The doctor and the routing log still count its calls, because a call would be frontier spend outside the escalation rule. Observed on v2.1.308, 2026-10-22.
 - **Silent override.** `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` makes every spawn ignore the requested `model` without a message. A per-spawn `model` beats plain `CLAUDE_CODE_SUBAGENT_MODEL`. Per the sub-agents docs, read 2026-10-17.
 - **Fork locks the model.** A fork runs on the session model and takes no `model` or `effort`. It saves context, not cost.
 - **Effort.** Per-spawn `effort` works on non-fork delegates. `CLAUDE_CODE_EFFORT_LEVEL` overrides it. Observed on v2.1.302, 2026-10-17.
