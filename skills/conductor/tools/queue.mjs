@@ -628,8 +628,15 @@ export function exitCodeFor(result, signals = osConstants.signals) {
 }
 
 /** Not `import.meta.url === file://${argv[1]}`: that breaks on a path with a space and exits 0 having done nothing. */
+// Node resolves the module's own URL through symlinks but leaves argv[1] as typed, so compare real
+// paths: a mismatch makes the CLI exit 0 without running anything, a silent false pass.
 export function isDirectInvocation(entryPath, moduleUrl) {
-  return Boolean(entryPath) && fileURLToPath(moduleUrl) === entryPath;
+  if (!entryPath) return false;
+  let real = entryPath;
+  try {
+    real = realpathSync(entryPath);
+  } catch {}
+  return fileURLToPath(moduleUrl) === real;
 }
 
 export function detectFlock(run = spawnSync) {
