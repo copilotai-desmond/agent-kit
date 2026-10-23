@@ -1,0 +1,3 @@
+# Heavy commands are queued in place when the session auto-approves them
+
+The Claude Code mod rewrites a heavy Bash command in place into `queue.mjs run --queue=<q> -- bash -c '<command>'`, but only when the engine's permission check allows both the command as typed and the queued form outright. Rules and prompts match the text that runs, and deny rules never see inside the queued form. So a typed command that is denied goes on unchanged to be denied by its rule. A typed queued form whose inner command is denied is refused. Any other verdict denies the call and names the queued form for the agent to run. The cost is a refused call and a retry outside auto-approval, and three permission queries per heavy command.

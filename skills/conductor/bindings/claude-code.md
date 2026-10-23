@@ -25,7 +25,12 @@ Claude Code has one model family. Spawn reviewers and verifiers fresh at their o
 | ask | `AskUserQuestion` with options | In `-p` mode the tool is absent. Ask in plain text, list the options, and stop |
 | track | The session's todo tool. Prefer a tool whose description says it holds the todo list the operator watches. Otherwise use a built-in todo or task tool. Pass the playbook's name as its title and the tracker issue's URL as its link where it takes them. Mark a skipped step with the tool's skipped status when it has one, else as completed with `skip: <reason>` in its text | If none exists, keep the list in the reply and restate it when it changes |
 | show | Mermaid in the reply for flows. For a mockup, write a throwaway HTML file and publish it with the `Artifact` tool. Screenshots by path | Without `Artifact`, give the file path |
+| background | The `Bash` tool with `run_in_background: true`. It notifies on completion. Do not poll | None. Run it in the foreground only when the queue has a free slot |
 | isolate | `Agent` with `isolation: "worktree"` | Tell the delegate to `git worktree add` its own path and stay inside it |
+
+## The queue on Bash
+
+The plugin's mod queues a heavy `Bash` command as `node <plugin>/skills/conductor/tools/queue.mjs run --queue=<q> -- bash -c '<command>'`. It asks the session's permission check about the command as typed and about that queued form. When both are allowed outright (`bypassPermissions`, or rules that allow both), it rewrites the command in place, so type heavy commands plainly and pass `run_in_background: true`. When the typed command is denied, it goes on unchanged and is denied by its own rule. Otherwise the mod denies the call and names the queued form. Run exactly that, with `run_in_background: true`, and the person approves the real queued command. A queued form whose inner command a rule denies is denied too, so allowing `queue.mjs run` allows nothing a rule forbids. In every mode, a foreground heavy command on a full queue is denied with the holders named, so rerun it with `run_in_background: true`. A duplicate of a run already queued or running from the same folder is denied with that run's age and place. Wait for its notice when this session started it. A separate `PreToolUse` hook denies wait loops, so that check holds even where mods do not load.
 
 ## Repo instruction files
 
@@ -33,19 +38,19 @@ Besides `AGENTS.md`, read `CLAUDE.md` and `.claude/skills/` in the repo.
 
 ## Spawning by role
 
-Spawn each role as its role agent. Setup installs them from `claude-code-agents/`. Each one carries its tier's model and effort, the tools its role may not use, its rules and the report shape, so the brief needs only GOAL, SCOPE, CONTEXT, ACCEPTANCE and GATE.
+Spawn each role as its role agent. The conductor plugin ships them from `claude-code-agents/`, and Claude Code scopes each name to the plugin. Each one carries its tier's model and effort, the tools its role may not use, its rules and the report shape, so the brief needs only GOAL, SCOPE, CONTEXT, ACCEPTANCE and GATE.
 
 | Role | `subagent_type` | Default tier | Without the role agent |
 |---|---|---|---|
-| explorer | `conductor-explorer` | bulk-read | `Explore` |
-| implementer | `conductor-implementer` | strong-code | `general-purpose` |
-| editor | `conductor-editor` | mechanical | `general-purpose` |
-| reviewer | `conductor-reviewer` | frontier | `general-purpose` |
-| verifier | `conductor-verifier` | frontier | `general-purpose` |
+| explorer | `conductor:explorer` | bulk-read | `Explore` |
+| implementer | `conductor:implementer` | strong-code | `general-purpose` |
+| editor | `conductor:editor` | mechanical | `general-purpose` |
+| reviewer | `conductor:reviewer` | frontier | `general-purpose` |
+| verifier | `conductor:verifier` | frontier | `general-purpose` |
 
 To escalate, pass both `model` and `effort` from the tier table, and keep the spawn's `description` unchanged so the retry reads as the same piece of work. A per-spawn `model` replaces the agent's model, but the agent's `effort` stays unless you pass one.
 
-If `subagent_type` is unknown, the role agents are not installed. Tell the operator to run `/conductor setup`, then use the fallback type, pass `model` and `effort` on every spawn, and paste the body of `claude-code-agents/conductor-<role>.md` (everything below its frontmatter) into the brief.
+If `subagent_type` is unknown, the plugin is not installed or not enabled in this session. Tell the operator to install it with `/plugin marketplace add wedgey/agent-kit` and `/plugin install conductor@agent-kit`, or to enable it with `/plugin enable conductor@agent-kit`, then run `/reload-plugins`. Meanwhile use the fallback type, pass `model` and `effort` on every spawn, and paste the body of `claude-code-agents/<role>.md` (everything below its frontmatter) into the brief.
 
 The explorer, reviewer and verifier agents cannot edit or write files but can still run shell commands. After one of them, or any fallback spawn of those roles, returns, run `git status` and treat any change as a failed gate.
 
@@ -53,8 +58,32 @@ Every delegate that writes while another writes gets `isolation: "worktree"`. Di
 
 Delegates run in the background and notify on completion. Do not poll. Start the independent ones in one message so they run together.
 
+## Lanes
+
+A lane is a background subagent in its own worktree, spawned under the ticket's todo item so it groups there. It runs as long as the orchestrator's session does. Use a separate session (below) only when the epic must outlive this session, or the operator wants to take a lane over by hand.
+
+| Verb | Mechanism |
+|---|---|
+| dispatch | `Agent` with `subagent_type: "general-purpose"`, `isolation: "worktree"`, the lane brief as `prompt`, and the lane's tier as `model` and `effort`. That is `sonnet` and `medium`, or `opus` and `high` for a ticket that needs design or an escalated lane. Set `description` to the ticket, such as `#562 lane`. Not a role agent, because a lane must spawn its own delegates and the role agents cannot. Spawn it while the ticket's item is the one most recently marked in progress |
+| wait | A lane reports by ending its turn with the report as its text. Its completion notice carries it. A notice that says it is waiting on its own background work is interim, so keep waiting |
+| continue | `SendMessage` to the lane's agent id. It arrives between the lane's tool calls, or wakes it when idle |
+| stop | `TaskStop` with the lane's task id. Then `git worktree remove` its worktree once its branch is pushed |
+| read state | `git -C <worktree> log --oneline -3`, `gh pr view <branch>`, and the lane's last interim notice. Never its transcript file |
+
+The lane's worktree branches from `origin`'s default branch tip, not the local checkout. When BASE is a stacked parent, the lane runs `git fetch origin <parent>` and `git switch -c <BRANCH> origin/<parent>`, because the parent's own worktree still holds that branch. An escalated lane runs `git fetch origin <BRANCH>` and `git switch -c <BRANCH> origin/<BRANCH>`.
+
+### When lanes must outlive this session
+
+Dispatch a separate session instead, with `claude --bg --name <lane name> --permission-mode <your mode> --model <model> --effort <effort> "<lane brief>"`, with the lane's tier as above, from the repo's root, through the background verb. continue it with `SendMessage` to its name, read its state with `claude agents --json`, and stop it with `claude stop <id>`. Set the brief's REPORT TO to your session name so it can report by message. `ListAgents` prints your name on its first line. When you track the ticket, pass the lane's name in the todo tool's `lane` field so the pane can show it under the ticket. The pitfalls marked "separate sessions" apply only here.
+
 ## Pitfalls
 
+- **A fresh worktree is bare.** A subagent's `isolation: "worktree"` fires none of the repo's own worktree hooks, so dependencies are not installed. Put the repo's documented setup command in the brief's SETUP line. The lane runs it in the background before its first check. Observed on v2.1.309, 2026-10-23.
+- **A wrapped git is refused in a worktree lane.** The isolation guard refuses any `git` run behind another program, so a hook that rewrites commands, such as an output filter that prefixes them, leaves the lane unable to run git at all. Exclude git from such rewrites before the first epic. Observed on v2.1.309, 2026-10-23.
+- **Separate sessions: share a permission class with them.** A message between a session that bypasses permission prompts and one that prompts is held until the operator approves it, and nobody sees that prompt in a background session. Always pass `--permission-mode` with your own mode, and run epics from `auto` or `bypassPermissions`. Observed on v2.1.309, 2026-10-23.
+- **Separate sessions: they start on the dispatch folder's checkout.** They make their worktree only before their first edit, from whatever is checked out there, so BASE names `origin/<trunk>`. Observed on v2.1.309, 2026-10-23.
+- **Separate sessions: untrusted folders refuse them.** `claude --bg` fails with "Workspace not trusted" in a folder no interactive session has trusted. Observed on v2.1.309, 2026-10-23.
+- **Separate sessions: idle ones are reaped.** The supervisor stops a session that has sat idle and unattached for about an hour. A stopped session loses nothing, so resume it when its next instruction is ready. Per the agent view docs, read 2026-10-23.
 - **The advisor tool.** Every delegate's request carries a built-in `advisor` tool on `opus`, deferred so the delegate must find it by search. A delegate's search does not find it, an agent file cannot remove it, and no delegate has called it. A UI may show the advisor model and make routing look broken when it is not. Briefs say nothing about it. The doctor and the routing log still count its calls, because a call would be frontier spend outside the escalation rule. Observed on v2.1.308, 2026-10-22.
 - **Silent override.** `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` makes every spawn ignore the requested `model` without a message. A per-spawn `model` beats plain `CLAUDE_CODE_SUBAGENT_MODEL`. Per the sub-agents docs, read 2026-10-17.
 - **Fork locks the model.** A fork runs on the session model and takes no `model` or `effort`. It saves context, not cost.
