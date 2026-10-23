@@ -5,7 +5,7 @@ import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   CONFLICT_EXIT,
@@ -548,8 +548,9 @@ describe("flock plumbing", () => {
     mkdirSync(real);
     writeFileSync(path.join(real, "q.mjs"), "");
     symlinkSync(real, path.join(tmp, "link"));
-    const url = new URL(`file://${path.join(realpathSync(real), "q.mjs")}`).href;
-    expect(isDirectInvocation(path.join(tmp, "link", "q.mjs"), url)).toBe(true);
+    const viaLink = path.join(tmp, "link", "q.mjs");
+    expect(isDirectInvocation(viaLink, pathToFileURL(path.join(realpathSync(real), "q.mjs")).href)).toBe(true);
+    expect(isDirectInvocation(viaLink, pathToFileURL(viaLink).href)).toBe(true);
   });
 
   it("runs the command when invoked through a symlinked folder", () => {
