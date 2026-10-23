@@ -2,10 +2,10 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { expect } from "./expect.mjs";
 import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   CONFLICT_EXIT,
@@ -541,6 +541,24 @@ describe("flock plumbing", () => {
     expect(isDirectInvocation("/tmp/sp ace/q.mjs", "file:///tmp/sp%20ace/q.mjs")).toBe(true);
     expect(isDirectInvocation("/r/o.mjs", "file:///r/q.mjs")).toBe(false);
     expect(isDirectInvocation(undefined, "file:///r/q.mjs")).toBe(false);
+  });
+
+  it("matches direct invocation through a symlinked folder", () => {
+    const real = path.join(tmp, "real");
+    mkdirSync(real);
+    writeFileSync(path.join(real, "q.mjs"), "");
+    symlinkSync(real, path.join(tmp, "link"));
+    const viaLink = path.join(tmp, "link", "q.mjs");
+    expect(isDirectInvocation(viaLink, pathToFileURL(path.join(realpathSync(real), "q.mjs")).href)).toBe(true);
+    expect(isDirectInvocation(viaLink, pathToFileURL(viaLink).href)).toBe(true);
+  });
+
+  it("runs the command when invoked through a symlinked folder", () => {
+    symlinkSync(path.dirname(QUEUE_MJS), path.join(tmp, "tools"));
+    const r = spawnSync(process.execPath, [path.join(tmp, "tools", "queue.mjs"), "run", "--queue=tests", "--", "sh", "-c", "exit 3"], {
+      env: { ...process.env, CONDUCTOR_QUEUE_DIR: path.join(tmp, "state") },
+    });
+    expect(r.status).toBe(3);
   });
 
   it("backs off exponentially, capped, or at a fixed poll", () => {
