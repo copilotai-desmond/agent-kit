@@ -30,10 +30,27 @@ import {
   currentTodo,
   todoInputError,
   parseVerdict,
+  settleFinished,
+  shortMemory,
+  holderUsage,
+  queueOutcome,
+  exclusive,
+  parseQueueStatus,
+  place,
+  queueHeader,
+  queueTotals,
   parseAgentDef,
   modelMatches,
   newChanges,
   parseBranch,
+  agentName,
+  groupTodos,
+  pluginAgentPaths,
+  pluginInstallPath,
+  contextRepo,
+  repoOf,
+  ticketOf,
+  todoTitle,
 } from '../hooks/lib'
 
 const PS = [
@@ -138,6 +155,90 @@ describe('agents', () => {
     const first = mergeAgents([], [{ id: 'a1', type: 'Explore', description: 'Find callers', status: 'running' }], 1000)
     const second = mergeAgents(first, [], 5000)
     expect(second).toEqual([{ id: 'a1', type: 'Explore', description: 'Find callers', status: 'completed', firstSeenAt: 1000, endedAt: 5000 }])
+  })
+})
+
+describe('finished runs', () => {
+  test('an agent whose run has ended reads as completed, whatever the list still says', () => {
+    const list = [
+      { id: 'a', type: 't', description: 'd', status: 'running' },
+      { id: 'b', type: 't', description: 'd', status: 'idle' },
+      { id: 'c', type: 't', description: 'd', status: 'failed' },
+      { id: 'd', type: 't', description: 'd', status: 'running' },
+    ] as const
+    const settled = settleFinished(list, { a: { isFinished: true }, b: { isFinished: true }, c: { isFinished: true }, d: { isFinished: false } })
+    expect(settled.map(a => a.status)).toEqual(['completed', 'completed', 'failed', 'running'])
+  })
+})
+
+describe('queue', () => {
+  const STATUS = {
+    queues: [
+      { name: 'tests', slots: 2, slotsSource: 'env', holders: [{ slot: 0 }, { slot: 1 }], waiters: [{ ticket: 'a' }] },
+      { name: 'e2e', slots: 1, slotsSource: 'files', holders: [], waiters: [{ ticket: 'b' }] },
+    ],
+    machine: { cores: 8, load1: 12.3, memAvailKb: 8_388_608, memTotalKb: 21_000_000 },
+  }
+
+  test('status --json is read when it has the contract shape', () => {
+    expect(parseQueueStatus(JSON.stringify(STATUS))?.queues).toHaveLength(2)
+    expect(parseQueueStatus('{"queues": "x"}')).toBeUndefined()
+    expect(parseQueueStatus('{"queues": [], "machine": null}')).toBeUndefined()
+    expect(parseQueueStatus('not json')).toBeUndefined()
+  })
+
+  test('the header names each queue, the load against cores and free memory', () => {
+    const status = parseQueueStatus(JSON.stringify(STATUS))!
+    expect(queueHeader(status)).toBe('tests 2/2 · e2e 0/1 · load 12 / 8 cores · 8.0G free')
+    expect(queueTotals(status)).toEqual({ busy: 2, slots: 3, waiting: 2 })
+    const blind = parseQueueStatus(JSON.stringify({ ...STATUS, machine: { cores: 8, load1: 1.4, memAvailKb: null, memTotalKb: null } }))!
+    expect(queueHeader(blind)).toBe('tests 2/2 · e2e 0/1 · load 1 / 8 cores')
+  })
+
+  test('a place is the worktree name, else the last folder', () => {
+    expect(place('/workspace/.worktrees/q-plain/apps/web')).toBe('q-plain')
+    expect(place('/repo/apps/web')).toBe('web')
+    expect(shortMemory(50_152)).toBe('49M')
+    expect(shortMemory(1_048_576)).toBe('1.0G')
+    expect(shortMemory(17_536_892)).toBe('16.7G')
+  })
+
+  test('a holder with no CPU or memory reading shows none, and a half reading a ?', () => {
+    expect(holderUsage({ cpuPct: 101, memKb: 50_152 })).toBe('1.0 cores · 49M')
+    expect(holderUsage({ cpuPct: null, memKb: null })).toBeUndefined()
+    expect(holderUsage({ cpuPct: 0, memKb: null })).toBe('0.0 cores · ?')
+  })
+
+  test("a queue command's outcome comes from its JSON whatever its exit code, else from stderr or the code", () => {
+    expect(queueOutcome('stop tests slot 0', { exitCode: 0, stdout: '{"ok":true,"stopped":2,"killed":0}', stderr: '' })).toBe('stop tests slot 0: 2 processes stopped')
+    expect(queueOutcome('stop tests slot 7', { exitCode: 1, stdout: '{"ok":false,"reason":"no live holder in slot 7 of tests"}', stderr: '' })).toBe(
+      'stop tests slot 7: not done (no live holder in slot 7 of tests)',
+    )
+    expect(queueOutcome('move x up', { exitCode: 0, stdout: '{"ok":true}', stderr: '' })).toBe('move x up: done')
+    expect(queueOutcome('move x to the top', { exitCode: 0, stdout: '{"ok":true,"note":"already at the top"}', stderr: '' })).toBe('move x to the top: already at the top')
+    expect(queueOutcome('move x up', { exitCode: 2, stdout: 'Error: boom', stderr: 'node: boom\n' })).toBe('move x up: failed: node: boom')
+    expect(queueOutcome('move x up', { exitCode: 2, stdout: '', stderr: '' })).toBe('move x up: failed: exit 2')
+  })
+
+  test('a call made while one is running is skipped, and the next one after it runs', async () => {
+    let calls = 0
+    let release = () => {}
+    const guard = { isRunning: false }
+    const run = (n: number) =>
+      exclusive(guard, async () => {
+        calls += 1
+        await new Promise<void>(r => (release = r))
+        return n
+      })
+    const first = run(1)
+    expect(await run(2)).toBeUndefined()
+    expect(calls).toBe(1)
+    release()
+    expect(await first).toBe(1)
+    const third = run(3)
+    release()
+    expect(await third).toBe(3)
+    expect(calls).toBe(2)
   })
 })
 
@@ -281,6 +382,114 @@ describe('todos', () => {
     expect(todoInputError({ items: [{ content: 'a', status: 'done' }] })).toMatch(/status/)
     expect(todoInputError({ items: [{ content: '', status: 'pending' }] })).toMatch(/content/)
     expect(todoInputError({ items: [{ content: 'a', status: 'skipped', note: 'n/a' }], title: 'feature' })).toBeUndefined()
+    expect(todoInputError({ items: [{ content: 'a', status: 'pending', ticket: 12 }] })).toMatch(/ticket/)
+  })
+
+  test('an item keeps its ticket across replacements', () => {
+    expect(applyTodos(undefined, { items: [{ content: 'Fix', status: 'pending', ticket: '#4' }] }, 1).items[0]).toEqual({ content: 'Fix', status: 'pending', ticket: '#4' })
+  })
+
+  test('items group into now, next and done, each in list order', () => {
+    const items = [
+      { content: 'a', status: 'completed' },
+      { content: 'b', status: 'pending' },
+      { content: 'c', status: 'in_progress' },
+      { content: 'd', status: 'skipped' },
+      { content: 'e', status: 'pending' },
+      { content: 'f', status: 'in_progress' },
+    ] as const
+    const { now, next, done } = groupTodos(items)
+    expect(now.map(i => i.content)).toEqual(['c', 'f'])
+    expect(next.map(i => i.content)).toEqual(['b', 'e'])
+    expect(done.map(i => i.content)).toEqual(['a', 'd'])
+  })
+})
+
+describe('tickets', () => {
+  const REPO = 'wedgey/contexory'
+
+  test('a repo is read from an issue link or a remote, https or ssh', () => {
+    expect(repoOf('https://github.com/wedgey/contexory/issues/550')).toBe(REPO)
+    expect(repoOf('git@github.com:wedgey/agent-kit.git')).toBe('wedgey/agent-kit')
+    expect(repoOf('https://github.com/wedgey/agent-kit.git')).toBe('wedgey/agent-kit')
+    expect(repoOf('https://gitlab.com/a/b')).toBeUndefined()
+    expect(repoOf(undefined)).toBeUndefined()
+    expect(repoOf('https://github.com/orgs/wedgey/projects/4')).toBeUndefined()
+    expect(repoOf('https://github.com/users/wedgey/projects/1')).toBeUndefined()
+    expect(repoOf('https://github.com/enterprises/acme')).toBeUndefined()
+  })
+
+  test("the repo in context is the list link's when that is an issue or PR, else origin's", () => {
+    expect(contextRepo('https://github.com/wedgey/contexory/issues/550', 'wedgey/agent-kit')).toBe(REPO)
+    expect(contextRepo('https://github.com/wedgey/contexory/pull/12', undefined)).toBe(REPO)
+    expect(contextRepo('https://github.com/orgs/wedgey/projects/4', 'wedgey/agent-kit')).toBe('wedgey/agent-kit')
+    expect(contextRepo('https://github.com/wedgey/contexory', 'wedgey/agent-kit')).toBe('wedgey/agent-kit')
+    expect(contextRepo(undefined, undefined)).toBeUndefined()
+  })
+
+  test('a bare #N leads the text and links into the repo in context', () => {
+    expect(ticketOf({ content: '#554 Rerun failed e2e once' }, REPO)).toEqual({
+      ticket: { label: '#554', href: 'https://github.com/wedgey/contexory/issues/554' },
+      text: 'Rerun failed e2e once',
+    })
+    expect(ticketOf({ content: '#554: Rerun' })).toEqual({ ticket: { label: '#554' }, text: 'Rerun' })
+  })
+
+  test('owner/repo#N names its own repo; an owner-less repo#N is no ticket', () => {
+    expect(ticketOf({ content: 'wedgey/agent-kit#9 Conductor as a root plugin' }, REPO)).toEqual({
+      ticket: { label: 'agent-kit#9', href: 'https://github.com/wedgey/agent-kit/issues/9' },
+      text: 'Conductor as a root plugin',
+    })
+    expect(ticketOf({ content: 'acme/tool#3 Bump' }, REPO).ticket).toEqual({ label: 'tool#3', href: 'https://github.com/acme/tool/issues/3' })
+    expect(ticketOf({ content: 'wedgey/contexory#3 Bump' }, REPO).ticket?.label).toBe('#3')
+    expect(ticketOf({ content: 'agent-kit#9 x' }, REPO)).toEqual({ text: 'agent-kit#9 x' })
+    expect(ticketOf({ content: 'step#2 of the plan' }, REPO)).toEqual({ text: 'step#2 of the plan' })
+    expect(ticketOf({ content: 'C#9 interop' }, REPO)).toEqual({ text: 'C#9 interop' })
+  })
+
+  test('known limit: a leading "#1 priority" reads as ticket #1', () => {
+    expect(ticketOf({ content: '#1 priority: fix login' }, REPO).ticket?.label).toBe('#1')
+  })
+
+  test('a GitHub issue or PR URL keeps its own address', () => {
+    expect(ticketOf({ content: 'https://github.com/wedgey/contexory/pull/12 Ship it' }, REPO)).toEqual({
+      ticket: { label: '#12', href: 'https://github.com/wedgey/contexory/pull/12' },
+      text: 'Ship it',
+    })
+    expect(ticketOf({ content: 'https://github.com/wedgey/agent-kit/issues/9#issuecomment-1 Read' }, REPO).ticket).toEqual({
+      label: 'agent-kit#9',
+      href: 'https://github.com/wedgey/agent-kit/issues/9',
+    })
+  })
+
+  test('the ticket field wins, and a matching lead in the text is not shown twice', () => {
+    expect(ticketOf({ content: 'Fix the login redirect', ticket: '#123' }, REPO)).toEqual({
+      ticket: { label: '#123', href: 'https://github.com/wedgey/contexory/issues/123' },
+      text: 'Fix the login redirect',
+    })
+    expect(ticketOf({ content: '#123 Fix', ticket: '#123' }, REPO).text).toBe('Fix')
+    expect(ticketOf({ content: '#7 Fix', ticket: '#123' }, REPO).text).toBe('#7 Fix')
+    expect(ticketOf({ content: 'Fix', ticket: 'JIRA-4' })).toEqual({ ticket: { label: 'JIRA-4' }, text: 'Fix' })
+  })
+
+  test('a ticket URL off GitHub links under its last path segment, never the whole URL', () => {
+    expect(ticketOf({ content: 'Fix', ticket: 'https://linear.app/acme/issue/ENG-12/' }, REPO)).toEqual({
+      ticket: { label: 'ENG-12', href: 'https://linear.app/acme/issue/ENG-12/' },
+      text: 'Fix',
+    })
+    expect(ticketOf({ content: 'Read', ticket: 'https://acme.atlassian.net/browse/OPS-7?focus=1' }).ticket?.label).toBe('OPS-7')
+    expect(ticketOf({ content: 'Read', ticket: 'https://github.com/wedgey/contexory/discussions/40' }, REPO).ticket?.label).toBe('40')
+  })
+
+  test('no ticket: the text as written, and a # inside it is no ticket', () => {
+    expect(ticketOf({ content: 'Session-activity pane: now/next split' }, REPO)).toEqual({ text: 'Session-activity pane: now/next split' })
+    expect(ticketOf({ content: 'Fix bug #12 in auth' }, REPO)).toEqual({ text: 'Fix bug #12 in auth' })
+    expect(ticketOf({ content: '#12abc tag' }, REPO)).toEqual({ text: '#12abc tag' })
+  })
+
+  test('a title is the ticket then the text', () => {
+    expect(todoTitle({ content: 'Fix', ticket: '#9' }, REPO)).toBe('#9 Fix')
+    expect(todoTitle({ content: 'Fix' }, REPO)).toBe('Fix')
   })
 })
 
@@ -290,6 +499,10 @@ describe('delegates', () => {
     expect(parseVerdict('notes\nSTATUS: ISSUES\n')).toBe('ISSUES')
     expect(parseVerdict('**STATUS** FAIL')).toBe('FAIL')
     expect(parseVerdict('all good')).toBeUndefined()
+    expect(parseVerdict('Status: BLOCKED')).toBe('BLOCKED')
+    expect(parseVerdict('> **STATUS** — PASS')).toBe('PASS')
+    expect(parseVerdict('| STATUS | ISSUES |')).toBe('ISSUES')
+    expect(parseVerdict('The STATUS line will say PASS')).toBeUndefined()
   })
 
   test('an agent definition gives its model, effort and whether it may write', () => {
@@ -315,6 +528,44 @@ describe('delegates', () => {
     expect(parseAgentDef('---\ntools:\nmodel: opus\n---\n')).toEqual({ model: 'opus', isReadOnly: false })
   })
 
+  test('an agent file is known by its frontmatter name', () => {
+    expect(agentName('---\nname: implementer\nmodel: sonnet\n---\nname: other')).toBe('implementer')
+    expect(agentName('---\r\nname: "reviewer"\r\n---\r\n')).toBe('reviewer')
+    expect(agentName('no frontmatter')).toBeUndefined()
+  })
+
+  test('a plugin is found where it is installed, the project install first', () => {
+    const installed = {
+      version: 2,
+      plugins: {
+        'conductor@agent-kit': [
+          { scope: 'user', installPath: '/c/cache/agent-kit/conductor/0.1.0' },
+          { scope: 'project', projectPath: '/repo', installPath: '/c/cache/agent-kit/conductor/0.2.0' },
+        ],
+        'conductor-x@other': [{ scope: 'user', installPath: '/c/x' }],
+      },
+    }
+    expect(pluginInstallPath(installed, 'conductor', '/repo/.worktrees/a')).toBe('/c/cache/agent-kit/conductor/0.2.0')
+    expect(pluginInstallPath(installed, 'conductor', '/elsewhere')).toBe('/c/cache/agent-kit/conductor/0.1.0')
+    const projectOnly = { plugins: { 'lab@kit': [{ scope: 'project', projectPath: '/other', installPath: '/c/lab' }] } }
+    expect(pluginInstallPath(projectOnly, 'lab', '/repo')).toBeUndefined()
+    expect(pluginInstallPath(installed, 'missing', '/repo')).toBeUndefined()
+    expect(pluginInstallPath({ plugins: { 'old@m': { installPath: '/c/old' } } }, 'old', '/repo')).toBe('/c/old')
+    expect(pluginInstallPath('garbage', 'conductor', '/repo')).toBeUndefined()
+    expect(pluginInstallPath({ plugins: { conductors: { installPath: '/c/s' } } }, 'conductor', '/repo')).toBeUndefined()
+    expect(pluginInstallPath({ plugins: { conductor: { installPath: '/c/bare' } } }, 'conductor', '/repo')).toBe('/c/bare')
+    const twoMarkets = { plugins: { 'conductor@other': { installPath: '/c/other' }, 'conductor@agent-kit': { installPath: '/c/kit' } } }
+    expect(pluginInstallPath(twoMarkets, 'conductor@agent-kit', '/repo')).toBe('/c/kit')
+  })
+
+  test("a plugin's agents are its agents/ folder plus what its manifest lists", () => {
+    expect(pluginAgentPaths({})).toEqual(['agents'])
+    expect(pluginAgentPaths({ agents: ['./skills/a/implementer.md', './more/'] })).toEqual(['agents', 'skills/a/implementer.md', 'more'])
+    expect(pluginAgentPaths({ agents: './custom' })).toEqual(['agents', 'custom'])
+    expect(pluginAgentPaths({ agents: ['../x.md', '/abs/x.md', './a/../../x.md', 'bare.md', './ok.md'] })).toEqual(['agents', 'ok.md'])
+    expect(pluginAgentPaths(null)).toEqual(['agents'])
+  })
+
   test('changed files are the porcelain lines a snapshot did not have', () => {
     expect(newChanges([' M a.ts'], ' M a.ts\n?? b.ts\n M c.ts\n')).toBe(2)
     expect(newChanges([], '')).toBe(0)
@@ -326,5 +577,12 @@ describe('branch health', () => {
     expect(parseBranch('feat/x\norigin/main\n3\n      2\n')).toEqual({ branch: 'feat/x', trunk: 'origin/main', behind: 3, changed: 2 })
     expect(parseBranch('feat/x\norigin/main\n\n0\n')).toEqual({ branch: 'feat/x', trunk: 'origin/main', changed: 0 })
     expect(parseBranch('')).toBeUndefined()
+    expect(parseBranch('feat/x\norigin/main\n0\n0\ngit@github.com:wedgey/agent-kit.git\n')).toEqual({
+      branch: 'feat/x',
+      trunk: 'origin/main',
+      behind: 0,
+      changed: 0,
+      repo: 'wedgey/agent-kit',
+    })
   })
 })

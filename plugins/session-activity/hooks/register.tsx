@@ -1,17 +1,26 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { AgentMetrics, AgentRow, Orphan, ShellTask, SpawnInfo, TodoItem, TodoStatus, Verdict } from '../types'
+import type { AgentMetrics, AgentRow, HeavyQueue, Orphan, QueueHolder, QueueStatus, QueueWaiter, ShellTask, SpawnInfo, TodoItem, TodoList, TodoStatus, Verdict } from '../types'
 import {
+  agentName,
   applyTodos,
   BRANCH_SCRIPT,
   cpuSince,
+  currentItem,
   currentTodo,
+  groupTodos,
+  pluginAgentPaths,
+  pluginInstallPath,
+  contextRepo,
+  ticketOf,
+  todoTitle,
   modelMatches,
   newChanges,
   parseAgentDef,
   parseBranch,
   parseVerdict,
+  settleFinished,
   porcelainLines,
   todoInputError,
   type TodoInput,
@@ -41,6 +50,13 @@ import {
   summarizeToolUse,
   treeOf,
   usageTokens,
+  holderUsage,
+  queueOutcome,
+  exclusive,
+  parseQueueStatus,
+  place,
+  queueHeader,
+  queueTotals,
   type ProcRow,
 } from './lib'
 
@@ -67,15 +83,28 @@ const todosA = atom({ plugin: 'session-activity', key: 'todos' } as const, { ite
 const spawnsA = atom({ plugin: 'session-activity', key: 'spawns' } as const, {})
 const branchA = atom({ plugin: 'session-activity', key: 'branch' } as const, { branch: '', changed: 0 })
 const spendA = atom({ plugin: 'session-activity', key: 'spend' } as const, {})
+const queueA = atom({ plugin: 'session-activity', key: 'queue' } as const, null)
+const queueNoteA = atom({ plugin: 'session-activity', key: 'queueNote' } as const, '')
+// Pids in this session's process tree when the queue was last read: what marks a run "you".
+const queueOwnA = atom({ plugin: 'session-activity', key: 'queueOwn' } as const, [])
+
+// $.state lives as long as the process; a resumed session in a new process gets its todos back from here.
+const TODOS_KEY = 'todos:'
+const KEEP_TODOS_MS = 7 * 86_400_000
+// Every 3 s only while the pane shows a busy queue.
+const QUEUE_EVERY_MS = 3000
+const QUEUE_IDLE_EVERY_MS = 30_000
+const QUEUE_TIMEOUT_MS = 15_000
 
 const TODO_TOOL = 'todos'
 const TODO_TOOL_CALL = /^mcp__session-activity__todos$/
+const HANDBACK_TOOL = /(^|__)SubagentHandback$/
 const GH_TIMEOUT_MS = 3000
 const BRANCH_EVERY_MS = 30_000
 const PR_EVERY_MS = 300_000
 const TODO_ICON: Record<TodoStatus, { glyph: string; color: string }> = {
   completed: { glyph: '✓', color: 'success' },
-  in_progress: { glyph: '●', color: 'suggestion' },
+  in_progress: { glyph: '◐', color: 'suggestion' },
   pending: { glyph: '○', color: 'inactive' },
   skipped: { glyph: '–', color: 'inactive' },
 }
@@ -83,7 +112,8 @@ const VERDICT_COLOR: Record<Verdict, string> = { PASS: 'success', 'PASS+NOTES': 
 const TODO_DESCRIPTION = [
   'Your todo list for the current task, drawn for the user in the session-activity pane beside the chat.',
   'Use it wherever your instructions say to track steps in a todo list. Each call replaces the whole list.',
-  'Mark an item in_progress when you start it and completed as soon as it is done. Never delete a step you will not do: mark it skipped with the reason in `note`.',
+  'Mark an item in_progress when you start it and completed as soon as it is done; an item whose work ends in a PR is done only when its PR is merge-ready and only the merge itself is left. Never delete a step you will not do: mark it skipped with the reason in `note`.',
+  'Start an item with its ticket, as `#123 Fix the login redirect` (or `owner/repo#9` for another repo), or pass it as `ticket`.',
   'Agents you spawn are listed under the item in progress when you spawn them.',
   '`title` heads the list (the kind of task, or the playbook it follows). `link` is the URL of the issue that holds the work state.',
 ].join(' ')
@@ -100,6 +130,7 @@ const TODO_SCHEMA = {
           content: { type: 'string' },
           status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'skipped'] },
           note: { type: 'string', description: 'Why an item is skipped, or any short note' },
+          ticket: { type: 'string', description: 'Issue or PR for this item, as #123, owner/repo#123 or a URL' },
         },
         required: ['content', 'status'],
       },
@@ -122,6 +153,9 @@ let tasksDir: string | undefined
 const ranCommands = new Map<string, string>()
 const agentCalls = new Map<string, { effort?: string; isolation?: string }>()
 let branchAt = 0
+let queueAt = 0
+// The conductor install whose queue.mjs was missing; a new install path is looked at again.
+let queueToolMissing: string | undefined
 let prLookup: { branch: string; at: number; pr?: number } | undefined
 
 const metricsOf = async ($: $, id: string, fn: (m: AgentMetrics) => AgentMetrics) =>
@@ -174,14 +208,48 @@ async function tailOf($: $, path: string) {
   }
 }
 
-async function agentDef($: $, type: string) {
-  if (type === 'fork' || type.includes(':') || type.includes('/')) return { isReadOnly: false }
-  const dirs = [`${await $.session.cwd()}/.claude/agents`, `${(await $.env.get('HOME')) ?? '~'}/.claude/agents`]
+type AgentDef = ReturnType<typeof parseAgentDef>
+const MAX_AGENT_FILE_BYTES = 256 * 1024
+
+const configDir = async ($: $) => (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${(await $.env.get('HOME')) ?? '~'}/.claude`
+
+async function agentDef($: $, type: string): Promise<AgentDef> {
+  if (type === 'fork' || type.includes('/')) return { isReadOnly: false }
+  if (type.includes(':')) return pluginAgentDef($, type)
+  const dirs = [`${await $.session.cwd()}/.claude/agents`, `${await configDir($)}/agents`]
   for (const dir of dirs) {
     try {
       return parseAgentDef(await $.fs.read(`${dir}/${type}.md`))
     } catch {}
   }
+  return { isReadOnly: false }
+}
+
+// `<plugin>:<name>`: the installed plugin's agent files, matched by their frontmatter `name`.
+// shortcut: a plugin loaded with --plugin-dir is not seen (no hook lists loaded plugins' folders); an installed copy of the same name is read instead.
+async function pluginAgentDef($: $, type: string): Promise<AgentDef> {
+  const plugin = type.slice(0, type.indexOf(':'))
+  const name = type.slice(type.lastIndexOf(':') + 1)
+  try {
+    const installed: unknown = JSON.parse(await $.fs.read(`${await configDir($)}/plugins/installed_plugins.json`))
+    const root = pluginInstallPath(installed, plugin, await $.session.cwd())
+    if (!root) return { isReadOnly: false }
+    const manifest: unknown = await $.fs.read(`${root}/.claude-plugin/plugin.json`).then(JSON.parse, () => ({}))
+    // $.fs takes any absolute path, so where each file lands is checked against the root as resolved the same way.
+    const realRoot = (await $.fs.stat(root, { resolve: true })).realPath ?? root
+    for (const entry of pluginAgentPaths(manifest)) {
+      const path = `${root}/${entry}`
+      const files = path.endsWith('.md')
+        ? [path]
+        : await $.fs.list(path).then(list => list.filter(f => f.name.endsWith('.md')).map(f => `${path}/${f.name}`), () => [])
+      for (const file of files) {
+        const stat = await $.fs.stat(file, { resolve: true }).catch(() => undefined)
+        if (!stat?.realPath?.startsWith(`${realRoot}/`) || stat.kind !== 'file' || stat.size > MAX_AGENT_FILE_BYTES) continue
+        const text = await $.fs.read(stat.realPath).catch(() => '')
+        if (agentName(text) === name) return parseAgentDef(text)
+      }
+    }
+  } catch {}
   return { isReadOnly: false }
 }
 
@@ -214,14 +282,19 @@ async function maybeOpen($: $) {
   if (!panes.some(p => p.id === PANE)) void $.ui.open({ id: PANE, title: 'Session activity' })
 }
 
-async function scan($: $, now: number) {
-  const [rows, ports] = await Promise.all([processTable($), listeningPorts($)])
-  const alive = new Set(rows.map(r => r.pid))
+async function liveRoot($: $, rows: readonly ProcRow[]): Promise<number> {
   let rootPid = await read($, rootPidA)
-  if (!alive.has(rootPid)) {
+  if (!rows.some(r => r.pid === rootPid)) {
     rootPid = await sessionRoot($).catch(() => 0)
     await update($, rootPidA, () => rootPid)
   }
+  return rootPid
+}
+
+async function scan($: $, now: number) {
+  const [rows, ports] = await Promise.all([processTable($), listeningPorts($)])
+  const alive = new Set(rows.map(r => r.pid))
+  const rootPid = await liveRoot($, rows)
   const shells = await read($, shellsA)
   const taken = new Set(shells.flatMap(s => (s.shellPid ? [s.shellPid] : [])))
   const found: Orphan[] = []
@@ -316,8 +389,8 @@ async function tick($: $) {
   isTicking = true
   try {
     const now = await $.clock.now()
-    const list = await $.agent.list()
-    await update($, agentsA, prev => mergeAgents(prev, list, now))
+    const [list, spawns] = await Promise.all([$.agent.list(), read($, spawnsA)])
+    await update($, agentsA, prev => mergeAgents(prev, settleFinished(list, spawns), now))
     await update($, shellsA, shells => expireFinished(shells, now, clearAfterMs))
     const shells = await read($, shellsA)
     const orphans = await read($, orphansA)
@@ -332,8 +405,128 @@ async function tick($: $) {
   }
 }
 
+async function saveTodos($: $, todos: TodoList) {
+  try {
+    await $.store.set(`${TODOS_KEY}${await $.session.id()}`, { savedAt: await $.clock.now(), todos })
+  } catch {}
+}
+
+// Prunes week-old lists, then restores this session's when the process starts with none.
+async function restoreTodos($: $) {
+  try {
+    const [id, now, keys] = await Promise.all([$.session.id(), $.clock.now(), $.store.keys()])
+    for (const key of keys.filter(k => k.startsWith(TODOS_KEY))) {
+      const saved = (await $.store.get(key)) as { savedAt?: number } | undefined
+      if (now - (saved?.savedAt ?? 0) > KEEP_TODOS_MS) await $.store.delete(key)
+    }
+    const saved = (await $.store.get(`${TODOS_KEY}${id}`)) as { todos?: TodoList } | undefined
+    if (Array.isArray(saved?.todos?.items) && (await read($, todosA)).items.length === 0) await update($, todosA, () => saved.todos!)
+  } catch {}
+}
+
+async function queueTool($: $): Promise<string | undefined> {
+  try {
+    const installed: unknown = JSON.parse(await $.fs.read(`${await configDir($)}/plugins/installed_plugins.json`))
+    // Only agent-kit's conductor speaks queue.mjs's protocol; a same-named plugin elsewhere does not.
+    const root = pluginInstallPath(installed, 'conductor@agent-kit', await $.session.cwd())
+    if (!root || root === queueToolMissing) return undefined
+    const tool = `${root}/skills/conductor/tools/queue.mjs`
+    if ((await $.fs.stat(tool).catch(() => undefined))?.kind === 'file') return tool
+    queueToolMissing = root
+  } catch {}
+  return undefined
+}
+
+async function readQueue($: $, tool: string): Promise<QueueStatus | undefined> {
+  const out = await $.process.run(['node', tool, 'status', '--json'], { timeoutMs: QUEUE_TIMEOUT_MS }).catch(() => undefined)
+  return out?.exitCode === 0 ? parseQueueStatus(out.stdout) : undefined
+}
+
+// The status call samples CPU for about a second, so two never run at once; nor do two button commands.
+const queuePoll = { isRunning: false }
+const queueButton = { isRunning: false }
+
+async function pollQueue($: $, isForced: boolean) {
+  await exclusive(queuePoll, () => pollQueueOnce($, isForced))
+}
+
+async function pollQueueOnce($: $, isForced: boolean) {
+  const now = await $.clock.now()
+  const last = await read($, queueA)
+  const isBusy = last?.queues.some(q => q.holders.length + q.waiters.length > 0) ?? false
+  const isShown = isBusy && (await $.ui.panes()).some(p => p.id === PANE && p.isShown)
+  if (!isForced && now - queueAt < (isShown ? QUEUE_EVERY_MS : QUEUE_IDLE_EVERY_MS)) return
+  queueAt = now
+  const tool = await queueTool($)
+  if (!tool) {
+    if (last) await update($, queueA, () => null)
+    return
+  }
+  const status = await readQueue($, tool)
+  // A failed read keeps the last status rather than blinking the section away.
+  if (status) {
+    const { busy, waiting } = queueTotals(status)
+    const own = busy + waiting > 0 ? await sessionPids($) : []
+    await update($, queueA, () => status)
+    await update($, queueOwnA, () => own)
+  }
+  await refreshStatus($)
+}
+
+// This session's process tree: everything under its root, whatever folder it runs in.
+async function sessionPids($: $): Promise<number[]> {
+  const rows = await processTable($).catch(() => [])
+  return treeOf(rows, await liveRoot($, rows)).map(r => r.pid)
+}
+
+// `refuse` sees the tool and may answer a note instead of running the command.
+type Refuse = (tool: string) => Promise<string | undefined>
+
+async function queueAct($: $, what: string, args: string[], refuse?: Refuse) {
+  await exclusive(queueButton, () => queueActOnce($, what, args, refuse))
+}
+
+// A button's queue command; its outcome is the section's note line.
+async function queueActOnce($: $, what: string, args: string[], refuse?: Refuse) {
+  let note: string
+  try {
+    const tool = await queueTool($)
+    if (!tool) throw new Error('the conductor plugin is not installed')
+    note = (await refuse?.(tool)) ?? queueOutcome(what, await $.process.run(['node', tool, ...args], { timeoutMs: QUEUE_TIMEOUT_MS }))
+  } catch (err) {
+    note = `${what}: failed: ${err instanceof Error ? err.message : String(err)}`
+  }
+  await update($, queueNoteA, () => note)
+  await pollQueue($, true)
+}
+
+async function stopHolder($: $, q: HeavyQueue, h: QueueHolder) {
+  const what = `stop ${q.name} slot ${h.slot}`
+  const question = `Stop ${h.command ? `\`${h.command}\`` : 'the orphaned run'} in ${q.name} slot ${h.slot}${h.cwd ? ` (${place(h.cwd)})` : ''}?`
+  // A dismissed question rejects; that is a no.
+  const isYes = await $.ui.ask(question, ['Stop it', 'Keep it']).then(
+    answer => answer === 'Stop it',
+    () => false,
+  )
+  if (!isYes) return
+  // queue.mjs stops whatever holds the slot now, which may be a run that took it while the question was open.
+  await queueAct($, what, ['stop', q.name, String(h.slot)], async tool => {
+    const status = await readQueue($, tool)
+    if (!status) return `${what}: not done (could not read the queue)`
+    const now = status.queues.find(x => x.name === q.name)?.holders.find(x => x.slot === h.slot)
+    return now?.pid === h.pid && now.command === h.command ? undefined : `${q.name} slot ${h.slot} changed hands; not stopped`
+  })
+}
+
 async function refreshStatus($: $) {
-  const [agents, shells, orphans, todos] = await Promise.all([read($, agentsA), read($, shellsA), read($, orphansA), read($, todosA)])
+  const [agents, shells, orphans, todos, branch, queue] = await Promise.all([
+    read($, agentsA),
+    read($, shellsA),
+    read($, orphansA),
+    read($, todosA),
+    read($, branchA),
+    read($, queueA),
+  ])
   const running = shells.filter(s => s.status === 'running')
   const servers = running.filter(s => s.ports.length > 0).length
   const parts = [
@@ -344,8 +537,11 @@ async function refreshStatus($: $) {
   const words = parts.filter(([n]) => n > 0).map(([n, w]) => `${n} ${w}${n === 1 ? '' : 's'}`)
   if (orphans.length > 0) words.push(`⚠ ${orphans.length} orphan${orphans.length === 1 ? '' : 's'}`)
   const done = todos.items.filter(i => i.status === 'completed' || i.status === 'skipped').length
-  const step = todos.items.length > 0 ? `◆ ${done}/${todos.items.length}${currentTodo(todos) ? ` ${currentTodo(todos)}` : ''}` : undefined
-  const line = [step, words.length > 0 ? `⚙ ${words.join(' · ')}` : undefined].filter(Boolean).join('  ')
+  const now = currentItem(todos)
+  const step = todos.items.length > 0 ? `◆ ${done}/${todos.items.length}${now ? ` ${todoTitle(now, contextRepo(todos.link, branch.repo))}` : ''}` : undefined
+  const totals = queue ? queueTotals(queue) : undefined
+  const queued = totals && totals.busy + totals.waiting > 0 ? `queue ${totals.busy}/${totals.slots}${totals.waiting > 0 ? ` +${totals.waiting}` : ''}` : undefined
+  const line = [[step, words.length > 0 ? `⚙ ${words.join(' · ')}` : undefined].filter(Boolean).join('  '), queued].filter(Boolean).join(' · ')
   $.ui.status(line || undefined)
 }
 
@@ -411,7 +607,9 @@ export const register: Register = (on, options) => {
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    await restoreTodos($)
     $.clock.every(TICK_MS, () => void tick($))
+    $.clock.every(QUEUE_EVERY_MS, () => void pollQueue($, false))
     await $.command.register({
       name: 'activity',
       description: 'Show or hide the session activity pane; `/activity stop-all` stops every background server and orphan',
@@ -439,6 +637,7 @@ export const register: Register = (on, options) => {
     }
     isDismissed = false
     await $.ui.open({ id: PANE, title: 'Session activity' })
+    await pollQueue($, true)
     await tick($)
     return { text: 'Session activity pane opened.' }
   })
@@ -506,7 +705,7 @@ export const register: Register = (on, options) => {
     const error = todoInputError(e)
     if (error) return { result: `Not saved: ${error}`, isError: true }
     const now = await $.clock.now()
-    await update($, todosA, prev => applyTodos(prev, e as unknown as TodoInput, now))
+    await saveTodos($, await update($, todosA, prev => applyTodos(prev, e as unknown as TodoInput, now)))
     void maybeOpen($)
     await refreshBranch($, now)
     await refreshStatus($)
@@ -520,7 +719,7 @@ export const register: Register = (on, options) => {
     if (ran.deny !== undefined || ran.isError || e.agentId) return ran
     const now = await $.clock.now()
     const items = e.todos.map(t => ({ content: t.content, status: t.status }))
-    await update($, todosA, prev => applyTodos(prev, { items }, now))
+    await saveTodos($, await update($, todosA, prev => applyTodos(prev, { items }, now)))
     return ran
   }).catch(($, e, next) => next(e))
 
@@ -580,6 +779,7 @@ export const register: Register = (on, options) => {
         [id]: {
           ...all[id],
           verdict: verdict ?? all[id]?.verdict,
+          isFinished: true,
           // A resume retakes the snapshot, so its count must not erase an earlier run's.
           changedFiles: after === undefined ? all[id]?.changedFiles : Math.max(all[id]?.changedFiles ?? 0, newChanges(info.treeBefore ?? [], after)),
         },
@@ -596,8 +796,22 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  // A delegate may report through SubagentHandback and end its run with no text of its own.
+  on('tool.call', { tool: HANDBACK_TOOL }, async ($, e, next) => {
+    const ran = await next(e)
+    const message = (e as unknown as { message?: unknown }).message
+    const id = e.agentId
+    const verdict = typeof message === 'string' ? parseVerdict(message) : undefined
+    if (id && verdict && ran.deny === undefined && !ran.isError) {
+      await update($, spawnsA, all => (all[id] ? { ...all, [id]: { ...all[id], verdict, isFinished: true } } : all))
+    }
+    return ran
+  }).catch(($, e, next) => next(e))
+
   on('turn.start', async ($, e, next) => {
     if (e.agentId) {
+      const id = e.agentId
+      await update($, spawnsA, all => (all[id]?.isFinished ? { ...all, [id]: { ...all[id], isFinished: false } } : all))
       const now = await $.clock.now()
       await metricsOf($, e.agentId, m => ({ ...m, startedAt: m.startedAt ?? now, prompt: m.prompt ?? (e.text || undefined) }))
       void maybeOpen($)
@@ -664,6 +878,9 @@ export const register: Register = (on, options) => {
       read($, spendA),
       $.clock.now(),
     ])
+    const [queue, queueNote, queueOwn] = await Promise.all([read($, queueA), read($, queueNoteA), read($, queueOwnA)])
+    const queueCount = queue ? queueTotals(queue) : { busy: 0, waiting: 0 }
+    const isQueueBusy = queueCount.busy + queueCount.waiting > 0
 
     const toggle = (key: string) => () =>
       void update($, expandedA, list => (list.includes(key) ? list.filter(k => k !== key) : [...list, key]))
@@ -745,7 +962,7 @@ export const register: Register = (on, options) => {
       const isRouted = (sp.wantModel !== undefined || sp.wantEffort !== undefined) && m.model !== undefined && !isWrongModel && !isWrongEffort
       const prior = sp.escalatedFrom ? metrics[sp.escalatedFrom] : undefined
       const priorVerdict = sp.escalatedFrom ? spawns[sp.escalatedFrom]?.verdict : undefined
-      const role = a.type.startsWith('conductor-') ? `${a.type.slice('conductor-'.length)}  ` : ''
+      const role = /^conductor[:-]/.test(a.type) ? `${a.type.slice('conductor-'.length)}  ` : ''
       const isActive = isAgentActive(a.status)
       const elapsed = formatDuration((a.endedAt ?? now) - (m.startedAt ?? a.firstSeenAt))
       const key = `agent:${a.id}`
@@ -860,16 +1077,85 @@ export const register: Register = (on, options) => {
       </Box>
     )
 
-    const isEmpty = agents.length === 0 && shells.length === 0 && orphans.length === 0 && todos.items.length === 0
+    const isEmpty = agents.length === 0 && shells.length === 0 && orphans.length === 0 && todos.items.length === 0 && !isQueueBusy
+
+    const isOwn = (pid: number | null) => pid !== null && (queueOwn.includes(pid) || shells.some(s => s.pids.includes(pid)))
+    const queueRow = (key: string, glyph: string, color: string, left: string, right: (JSX.Element | false)[]) => (
+      <Box key={key} flexDirection="row" justifyContent="space-between" gap={1}>
+        <Box flexShrink={1} minWidth={0}>
+          <Text wrap="truncate-end">
+            <Text color={color}>{glyph}</Text> {left}
+          </Text>
+        </Box>
+        <Box flexDirection="row" gap={1} flexShrink={0}>
+          {right.filter((r): r is JSX.Element => r !== false)}
+        </Box>
+      </Box>
+    )
+    const where = (cwd: string | null, command: string | null) => (cwd === null && command === null ? '(process gone)' : `${cwd ? place(cwd) : '?'} ${command ?? ''}`.trim())
+    const holderRow = (q: HeavyQueue, holder: QueueHolder) => {
+      const key = `queue:${q.name}:${holder.slot}`
+      const mark = holder.state === 'idle' || holder.state === 'orphan' ? holder.state : undefined
+      const usage = holderUsage(holder)
+      // Without a process there is nothing to stop.
+      const isGone = holder.pid === null
+      return queueRow(key, holder.state === 'unknown' ? '◌' : '●', mark ? 'warning' : 'suggestion', `${q.name}  ${isGone ? '(process gone)' : where(holder.cwd, holder.command)}`, [
+        isOwn(holder.pid) && <Text color="suggestion">you</Text>,
+        mark !== undefined && <Text color="warning">{mark}</Text>,
+        !isNarrow && holder.ageMs !== null && <Text dimColor>{formatDuration(holder.ageMs)}</Text>,
+        !isNarrow && usage !== undefined && <Text dimColor>{usage}</Text>,
+        !isGone && <Button key={`${key}:stop`} label={isNarrow ? '■' : 'stop'} dimColor onPress={() => void stopHolder($, q, holder)} />,
+      ])
+    }
+    const waiterRow = (q: HeavyQueue, w: QueueWaiter, i: number) => {
+      const key = `queue:${w.ticket}`
+      const move = (to: 'top' | 'up' | 'down') => () => void queueAct($, `move ${w.command ?? w.ticket} ${to === 'top' ? 'to the top' : to}`, ['move', w.ticket, to])
+      return queueRow(key, '○', 'inactive', `#${i + 1} ${q.name}  ${where(w.cwd, w.command)}`, [
+        isOwn(w.pid) && <Text color="suggestion">you</Text>,
+        w.priority === 'gate' && <Text color="suggestion">gate</Text>,
+        <Text dimColor>{`waiting ${formatDuration(w.waitedMs)}`}</Text>,
+        <Button key={`${key}:top`} label="top" dimColor onPress={move('top')} />,
+        <Button key={`${key}:up`} label="↑" dimColor onPress={move('up')} />,
+        <Button key={`${key}:down`} label="↓" dimColor onPress={move('down')} />,
+      ])
+    }
+    const waiting = queueCount.waiting
+    const queueSection = queue && isQueueBusy && (
+      <Box flexDirection="column" marginBottom={1}>
+        <Text wrap="truncate-end">
+          <Text bold>QUEUE</Text>
+          <Text dimColor> · {queueHeader(queue)}</Text>
+        </Text>
+        {queue.queues.flatMap(q => q.holders.map(holder => holderRow(q, holder)))}
+        {isNarrow
+          ? waiting > 0 && <Text dimColor>{`+${waiting} waiting`}</Text>
+          : queue.queues.flatMap(q => [...q.waiters].sort((a, b) => a.rank - b.rank).map((w, i) => waiterRow(q, w, i)))}
+        {queueNote && <Text dimColor wrap="truncate-end">{queueNote}</Text>}
+      </Box>
+    )
     const doneCount = todos.items.filter(i => i.status === 'completed' || i.status === 'skipped').length
-    const current = currentTodo(todos)
     const isBad = (a: AgentRow) =>
       a.status === 'failed' || (spawns[a.id]?.changedFiles ?? 0) > 0 || ['ISSUES', 'BLOCKED', 'FAIL'].includes(spawns[a.id]?.verdict ?? '')
 
+    const repo = contextRepo(todos.link, branch.repo)
+    const { now: nowItems, next: nextItems, done: doneItems } = groupTodos(todos.items)
+    // A done item stays out of the fold while an agent under it runs or needs a look.
+    const needsLook = (item: TodoItem) => agentsUnder(item.content).some(a => isAgentActive(a.status) || isBad(a))
+    const isNextOpen = !isNarrow || expanded.includes('todos')
+    const isDoneOpen = expanded.includes('todos:done')
+    const shownNext = isNextOpen ? nextItems : nextItems.slice(0, 1)
+    const shownDone = isDoneOpen ? doneItems : doneItems.filter(needsLook)
+    const badDone = doneItems.filter(i => agentsUnder(i.content).some(isBad)).length
+    const runningDone = doneItems.filter(i => agentsUnder(i.content).some(a => isAgentActive(a.status))).length
+    const doneWords = [`DONE · ${doneItems.length}`, badDone > 0 ? `${badDone} ✗` : '', runningDone > 0 ? `${runningDone} running` : ''].filter(Boolean)
+    const ticketCap = isNarrow ? 6 : 12
+    const clip = (label: string) => (label.length > ticketCap ? `${label.slice(0, ticketCap - 1)}…` : label)
+    // Wide, one column as wide as the longest shown ticket keeps the texts aligned; narrow, each ticket sits inline.
+    const ticketWidth = Math.max(0, ...[...nowItems, ...shownNext, ...shownDone].map(i => clip(ticketOf(i, repo).ticket?.label ?? '').length))
     const todoRow = (item: TodoItem) => {
       const key = `todo:${item.content}`
       const under = agentsUnder(item.content)
-      const isOpen = item.status === 'in_progress' ? !expanded.includes(key) : expanded.includes(key)
+      const isOpen = item.status === 'in_progress' || needsLook(item) ? !expanded.includes(key) : expanded.includes(key)
       const icon = TODO_ICON[item.status]
       const count = `${under.length} agent${under.length === 1 ? '' : 's'}`
       const right =
@@ -880,9 +1166,31 @@ export const register: Register = (on, options) => {
             : under.length > 0
               ? `${count} ${under.some(isBad) ? '✗' : '✓'}`
               : (item.note ?? '')
+      const { ticket, text } = ticketOf(item, repo)
+      const label = ticket ? clip(ticket.label) : ''
+      const column = isNarrow ? (label ? label.length + 1 : 0) : ticketWidth > 0 ? ticketWidth + 1 : 0
       return (
         <Box key={key} flexDirection="column">
-          {titleLine(key, icon.glyph, icon.color, item.content, right ? [<Text dimColor>{right}</Text>] : [])}
+          <Box flexDirection="row" justifyContent="space-between" gap={1}>
+            <Box flexDirection="row" flexShrink={1} minWidth={0}>
+              <Text color={icon.color}>{icon.glyph} </Text>
+              {column > 0 && (
+                <Box width={column} flexShrink={0}>
+                  {ticket && (ticket.href ? <Link href={ticket.href} label={label} /> : <Text dimColor>{label}</Text>)}
+                </Box>
+              )}
+              <Box flexShrink={1} minWidth={0}>
+                <Button key={`${key}:toggle`} plain onPress={toggle(key)}>
+                  <Text wrap="truncate-end">{text}</Text>
+                </Button>
+              </Box>
+            </Box>
+            {right && (
+              <Box flexShrink={0}>
+                <Text dimColor>{right}</Text>
+              </Box>
+            )}
+          </Box>
           {isOpen && under.length > 0 && (
             <Box flexDirection="column" paddingLeft={2}>
               {under.map(agentRow)}
@@ -903,9 +1211,7 @@ export const register: Register = (on, options) => {
           branch.pr ? `PR #${branch.pr}` : 'no PR',
         ].filter(Boolean)
       : []
-    const isListOpen = !isNarrow || expanded.includes('todos')
-    const currentItem = todos.items.find(i => i.content === current)
-    const nextItem = todos.items.find(i => i.status === 'pending')
+    const doneToggle = <Button key="todos:done" label={isDoneOpen ? 'hide' : 'show'} dimColor onPress={toggle('todos:done')} />
     const todoSection = todos.items.length > 0 && (
       <Box flexDirection="column" marginBottom={1}>
         <Box flexDirection="row" justifyContent="space-between" gap={1}>
@@ -929,17 +1235,20 @@ export const register: Register = (on, options) => {
           <Text color="suggestion">{'━'.repeat(filled)}</Text>
           <Text dimColor>{'━'.repeat(barWidth - filled)}</Text>
         </Text>
-        {isListOpen ? (
-          todos.items.map(todoRow)
-        ) : (
-          <Box flexDirection="column">
-            {currentItem ? todoRow(currentItem) : nextItem && <Text wrap="truncate-end"><Text dimColor>next: </Text>{nextItem.content}</Text>}
-            {currentItem && nextItem && <Text dimColor wrap="truncate-end">next: {nextItem.content}</Text>}
+        {!isNarrow && nowItems.length > 0 && <Text bold>NOW</Text>}
+        {nowItems.map(todoRow)}
+        {!isNarrow && nextItems.length > 0 && <Text bold>NEXT</Text>}
+        {shownNext.map(todoRow)}
+        {(doneItems.length > 0 || (isNarrow && nextItems.length > 1)) && (
+          <Box flexDirection="row" gap={1}>
+            {isNarrow && nextItems.length > 1 && (
+              <Button key="todos:toggle" label={isNextOpen ? 'fewer' : `+${nextItems.length - 1} more`} dimColor onPress={toggle('todos')} />
+            )}
+            {doneItems.length > 0 && <Text bold dimColor>{doneWords.join(' · ')}</Text>}
+            {doneItems.length > 0 && doneToggle}
           </Box>
         )}
-        {isNarrow && (
-          <Button key="todos:toggle" label={isListOpen ? 'hide list' : `all ${todos.items.length} todos`} dimColor onPress={toggle('todos')} />
-        )}
+        {shownDone.map(todoRow)}
       </Box>
     )
     const spend = Object.entries(spendTotals).sort((a, b) => b[1] - a[1])
@@ -976,6 +1285,8 @@ export const register: Register = (on, options) => {
             {listedFinished.map(shellRow)}
           </Box>
         )}
+
+        {queueSection}
 
         {orphans.length > 0 && (
           <Box flexDirection="column" marginBottom={1}>

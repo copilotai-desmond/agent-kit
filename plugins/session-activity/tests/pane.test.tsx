@@ -304,19 +304,77 @@ const spawn = ($: Engine, description: string, subagentType: string, extra: { mo
 const openPane = ($: Engine) =>
   $.command.run({ command: 'activity', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
 
-function quietHost(on: On, files: Record<string, string> = {}, status: string[] = ['']) {
+type Host = {
+  sessionId?: string
+  store?: Record<string, unknown>
+  statuses?: (string | undefined)[]
+  node?: (args: readonly string[]) => Promise<{ exitCode: number; stdout: string; stderr?: string } | undefined> | { exitCode: number; stdout: string; stderr?: string } | undefined
+  // `ps` rows; the pane's own `sh` (pid 50) is a child of pid 100.
+  ps?: string
+  stats?: string[]
+}
+
+function quietHost(
+  on: On,
+  files: Record<string, string> = {},
+  status: string[] = [''],
+  env: Record<string, string> = { HOME: '/home/me' },
+  branch = 'feat/x\norigin/main\n2\n1\n',
+  links: Record<string, string> = {},
+  host: Host = {},
+) {
+  const store = host.store ?? {}
+  on('session.id', () => ({ value: host.sessionId ?? 's1' }))
+  on('store.get', (_$, e) => ({ value: store[e.key] }))
+  on('store.set', (_$, e) => {
+    store[e.key] = e.value
+    return { value: undefined }
+  })
+  on('store.delete', (_$, e) => {
+    delete store[e.key]
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: Object.keys(store) }))
+  // A symbolic link: a path under `from` lands under `to`.
+  const real = (path: string) => {
+    for (const [from, to] of Object.entries(links)) if (path === from || path.startsWith(`${from}/`)) return `${to}${path.slice(from.length)}`
+    return path
+  }
   on('ui.panes', () => ({ value: [] }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.status', (_$, e) => {
+    host.statuses?.push(e.text)
+    return { value: undefined }
+  })
   on('session.cwd', () => ({ value: '/repo' }))
-  on('env.get', () => ({ value: '/home/me' }))
+  on('env.get', (_$, e) => ({ value: env[e.name] }))
   on('fs.read', (_$, e) => {
-    const text = files[e.path]
+    const text = files[real(e.path)]
     if (text === undefined) throw new Error('ENOENT')
     return { value: text }
   })
-  on('process.run', (_$, e) => {
-    const stdout = e.argv[0] === 'git' ? (status.length > 1 ? status.shift()! : status[0]!) : e.argv[0] === 'sh' ? 'feat/x\norigin/main\n2\n1\n' : ''
+  on('fs.list', (_$, e) => {
+    const dir = real(e.path)
+    const names = Object.keys(files).filter(f => f.startsWith(`${dir}/`) && !f.slice(dir.length + 1).includes('/'))
+    return { value: names.map(f => ({ name: f.slice(dir.length + 1), kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })) }
+  })
+  on('fs.stat', (_$, e) => {
+    host.stats?.push(e.path)
+    const to = real(e.path)
+    const text = files[to]
+    if (text === undefined && !Object.keys(files).some(f => f.startsWith(`${to}/`))) throw new Error('ENOENT')
+    const kind = text === undefined ? ('dir' as const) : ('file' as const)
+    return { value: { kind, size: text?.length ?? 0, mtimeMs: 0, isLink: to !== e.path, ...(e.resolve ? { realPath: to } : {}) } }
+  })
+  on('process.run', async (_$, e) => {
+    const ran = e.argv[0] === 'node' ? await host.node?.(e.argv.slice(1)) : undefined
+    if (ran !== undefined) return { value: { stderr: '', isStdoutTruncated: false, isStderrTruncated: false, ...ran } }
+    const isSelf = e.argv[0] === 'sh' && e.argv[2]?.startsWith('echo "self')
+    const stdout =
+      e.argv[0] === 'git' ? (status.length > 1 ? status.shift()! : status[0]!) :
+      host.ps !== undefined && isSelf ? `self 50\n   50   100    50  0.0  100 sh -c ps\n${host.ps}` :
+      host.ps !== undefined && e.argv[0] === 'ps' ? host.ps :
+      e.argv[0] === 'sh' ? branch : ''
     return { value: { exitCode: e.argv[0] === 'gh' ? 1 : 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('turn.step', async function* (_$, e) {
@@ -325,9 +383,12 @@ function quietHost(on: On, files: Record<string, string> = {}, status: string[] 
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage } as const
   })
   on('turn.complete', (_$, e) => ({ text: e.answer }))
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  on('tool.call', { tool: /^SubagentHandback$/ }, () => ({ result: 'Report delivered to your caller.', text: 'Report delivered to your caller.' }))
 }
 
 async function runTurn($: Engine, agentId: string, model: string, effort: Effort, answer = '') {
+  await $.turn.start({ turnId: `t-${agentId}`, agentId, text: '' })
   for await (const _chunk of $.turn.step({ turnId: `t-${agentId}`, index: 0, model, effort, messageCount: 1, agentId })) {
   }
   const usage = { input_tokens: 400, output_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model }
@@ -348,9 +409,12 @@ test('the todos tool draws the list with its title, progress, branch and skipped
     expect(await ui.find({ type: 'Link', text: '#512' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'feat/x · 2 behind main · 1 changed · no PR' })).toBeDefined()
     expect(await ui.find({ key: 'todo:Build in small units:toggle' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: 'skip: not asked' })).toBeDefined()
     await ui.unmount()
   }
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: 'skip: not asked' })).toBeUndefined()
+  await ui.press({ key: 'todos:done' })
+  expect(await ui.find({ type: 'Text', text: 'skip: not asked' })).toBeDefined()
 })
 
 test('the todos tool refuses a bad status, and a subagent, and keeps the list it had', async ($, on) => {
@@ -386,7 +450,10 @@ test('an agent sits under the step in progress when it was spawned, with its ver
 
   status = 'completed'
   await writeTodos($, { items: STEPS.map(s => (s.content === 'Build in small units' ? { ...s, status: 'completed' } : s)) })
+  await openPane($)
+  await openPane($)
   ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  await ui.press({ key: 'todos:done' })
   expect(await ui.find({ type: 'Text', text: '1 agent ✓' })).toBeDefined()
   expect(await ui.find({ key: 'agent:a1:toggle' })).toBeUndefined()
   await ui.press({ key: 'todo:Build in small units:toggle' })
@@ -408,6 +475,7 @@ test('a resumed agent keeps its step and verdict and is no escalation', async ($
   await openPane($)
 
   const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  await ui.press({ key: 'todos:done' })
   expect(await ui.find({ type: 'Text', text: '1 agent ✓' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /escalated/ })).toBeUndefined()
   await ui.press({ key: 'todo:Build in small units:toggle' })
@@ -463,16 +531,749 @@ test('the same brief spawned again on another model is an escalation; on the sam
   expect(await ui.find({ type: 'Text', text: /↑ escalated from Haiku 5\.5 \(BLOCKED\)/ })).toBeDefined()
 })
 
-test('under 46 columns the list folds to the current step and the next one', async ($, on) => {
+
+const QUEUE = [
+  { content: 'wedgey/agent-kit#7 Ship the role agents', status: 'completed' },
+  { content: 'Conductor as a root plugin: skill, agents, queue, hooks', ticket: 'wedgey/agent-kit#9', status: 'in_progress' },
+  { content: '#554 Rerun failed e2e once + flaky ledger', status: 'pending' },
+  { content: 'Session-activity pane: now/next split, per-item ticket', status: 'pending' },
+  { content: 'https://github.com/wedgey/contexory/pull/560 Queue status line', status: 'pending' },
+  { content: '#561 Watch the merge queue', status: 'pending' },
+  { content: 'Measure routing', status: 'skipped', note: 'not asked' },
+] as const
+const LINK = 'https://github.com/wedgey/contexory/issues/550'
+
+const ROOT = '/home/me/.claude/plugins/cache/agent-kit/conductor/0.1.0'
+const BINDINGS = 'skills/conductor/bindings/claude-code-agents'
+const installed = (plugins: Record<string, string>) =>
+  JSON.stringify({ version: 2, plugins: Object.fromEntries(Object.entries(plugins).map(([k, root]) => [k, [{ scope: 'user', installPath: root }]])) })
+const conductorTree = (configDir = '/home/me/.claude', root = ROOT) => ({
+  [`${configDir}/plugins/installed_plugins.json`]: installed({ 'conductor@agent-kit': root }),
+  [`${root}/.claude-plugin/plugin.json`]: JSON.stringify({ name: 'conductor', agents: [`./${BINDINGS}/implementer.md`, `./${BINDINGS}/reviewer.md`] }),
+  [`${root}/${BINDINGS}/implementer.md`]: '---\nname: implementer\nmodel: sonnet\neffort: medium\ndisallowedTools: Agent\n---\n',
+  [`${root}/${BINDINGS}/reviewer.md`]: '---\nname: reviewer\nmodel: opus\neffort: high\ndisallowedTools: Agent, Edit, Write\n---\n',
+})
+
+// The drawing as plain text: a row Box joins its children, a column Box stacks them, a Box width pads.
+function textOf(node: unknown): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  const el = node as { type?: string; props?: Record<string, unknown>; children?: unknown[] } | null
+  if (!el?.type) return ''
+  const props = el.props ?? {}
+  if (el.type === 'Link') return String(props.label ?? '')
+  if (el.type === 'Button' && props.label !== undefined) return props.plain ? String(props.label) : `[${String(props.label)}]`
+  const parts = (el.children ?? []).map(textOf).filter(p => p !== '')
+  if (el.type !== 'Box') return parts.join('')
+  const out = props.flexDirection === 'row' ? parts.join(props.gap ? ' ' : '') : parts.join('\n')
+  return typeof props.width === 'number' ? out.padEnd(props.width) : out
+}
+
+test('todos draw as NOW, NEXT and a folded DONE, each item behind an aligned ticket column', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  quietHost(on, conductorTree(), [''], { HOME: '/home/me' }, 'feat/conductor-queue\norigin/main\n0\n3\ngit@github.com:wedgey/contexory.git\n')
+  on('agent.list', () => ({ value: [{ id: 'r1', type: 'conductor:reviewer', description: 'Review the queue', status: 'running' }] }))
+  on('agent.spawn', () => ({ model: 'opus', agentId: 'r1' }))
+
+  await writeTodos($, { title: 'conductor queue plugin', link: LINK, items: QUEUE })
+  await spawn($, 'Review the queue', 'conductor:reviewer')
+  await runTurn($, 'r1', 'claude-opus-5-5', 'high')
+  await openPane($)
+
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE, props: { ...PANE.props, bodyColumns: 72 } })
+  const drawn = textOf(await ui.find({ type: 'Box' }))
+  const lines = drawn.split('\n')
+  const at = (pattern: RegExp) => lines.findIndex(l => pattern.test(l))
+  expect(at(/^NOW$/)).toBeLessThan(at(/Conductor as a root plugin/))
+  expect(at(/Conductor as a root plugin/)).toBeLessThan(at(/reviewer {2}Review the queue/))
+  expect(at(/reviewer {2}Review the queue/)).toBeLessThan(at(/^NEXT$/))
+  expect(lines.slice(at(/^NEXT$/) + 1, at(/^DONE/))).toEqual([
+    '○ #554        Rerun failed e2e once + flaky ledger',
+    '○             Session-activity pane: now/next split, per-item ticket',
+    '○ #560        Queue status line',
+    '○ #561        Watch the merge queue',
+  ])
+  expect(lines[at(/^DONE/)]).toBe('DONE · 2 [show]')
+  expect(await ui.find({ key: 'todo:Measure routing:toggle' })).toBeUndefined()
+
+  expect(await ui.find({ type: 'Link', text: 'agent-kit#9' })).toMatchObject({ props: { href: 'https://github.com/wedgey/agent-kit/issues/9' } })
+  expect(await ui.find({ type: 'Link', text: '#554' })).toMatchObject({ props: { href: 'https://github.com/wedgey/contexory/issues/554' } })
+  expect(await ui.find({ type: 'Link', text: '#560' })).toMatchObject({ props: { href: 'https://github.com/wedgey/contexory/pull/560' } })
+  expect((await ui.find({ key: 'todo:#554 Rerun failed e2e once + flaky ledger:toggle' }))?.text).toBe('Rerun failed e2e once + flaky ledger')
+  expect(await ui.find({ type: 'Text', text: /Opus 5\.5 · high ✓/ })).toBeDefined()
+
+  await ui.press({ key: 'todos:done' })
+  expect(await ui.find({ key: 'todos:done', text: 'hide' })).toBeDefined()
+  expect((await ui.find({ key: 'todo:wedgey/agent-kit#7 Ship the role agents:toggle' }))?.text).toBe('Ship the role agents')
+  expect(await ui.find({ type: 'Text', text: 'skip: not asked' })).toBeDefined()
+  await ui.press({ key: 'todos:done' })
+  expect(await ui.find({ key: 'todo:Measure routing:toggle' })).toBeUndefined()
+})
+
+test('the status line leads with the NOW item and its ticket', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const statuses: (string | undefined)[] = []
+  on('ui.status', (_$, e) => {
+    statuses.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.panes', () => ({ value: [] }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  await writeTodos($, { link: LINK, items: QUEUE })
+  expect(statuses.at(-1)).toBe('◆ 2/7 agent-kit#9 Conductor as a root plugin: skill, agents, queue, hooks')
+})
+
+test('under 46 columns the NOW item and the first NEXT item stay, ticket inline; the rest folds into one line', async ($, on) => {
   mock.clock(on, { now: 1_000_000 })
   quietHost(on)
   on('agent.list', () => ({ value: [] }))
-  await writeTodos($, { items: STEPS })
+  await writeTodos($, { link: LINK, items: QUEUE })
   const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE, props: { ...PANE.props, bodyColumns: 40 } })
-  expect(await ui.find({ key: 'todo:Build in small units:toggle' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /next: Open the PR/ })).toBeDefined()
-  expect(await ui.find({ key: 'todo:Map the subsystem:toggle' })).toBeUndefined()
+  const lines = textOf(await ui.find({ type: 'Box' })).split('\n')
+  expect(lines.slice(2)).toEqual([
+    '◐ agent… Conductor as a root plugin: skill, agents, queue, hooks 0s',
+    '○ #554 Rerun failed e2e once + flaky ledger',
+    '[+3 more] DONE · 2 [show]',
+  ])
+  // The ticket is cut to 6 columns, so 40 columns keep at least 20 for the text.
+  expect(lines[2]!.indexOf('Conductor')).toBeLessThanOrEqual(40 - 20)
+  expect(await ui.find({ type: 'Link', text: 'agent…' })).toMatchObject({ props: { href: 'https://github.com/wedgey/agent-kit/issues/9' } })
+
   await ui.press({ key: 'todos:toggle' })
-  expect(await ui.find({ key: 'todo:Map the subsystem:toggle' })).toBeDefined()
+  expect(await ui.find({ key: 'todo:#561 Watch the merge queue:toggle' })).toBeDefined()
+  expect(await ui.find({ key: 'todos:toggle', text: 'fewer' })).toBeDefined()
+  expect(await ui.find({ key: 'todo:Measure routing:toggle' })).toBeUndefined()
+  await ui.press({ key: 'todos:done' })
+  expect(await ui.find({ key: 'todo:Measure routing:toggle' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'skip' })).toBeDefined()
+})
+
+test('a done item stays out of the fold while an agent under it is running or needs a look, counted on the DONE line', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  quietHost(on)
+  const agents: { id: string; type: string; description: string; status: AgentStatus }[] = [
+    { id: 'b1', type: 'conductor:reviewer', description: 'Review A', status: 'completed' },
+    { id: 'b2', type: 'general-purpose', description: 'Watch B', status: 'running' },
+  ]
+  on('agent.list', () => ({ value: agents }))
+  let next = ''
+  on('agent.spawn', () => ({ model: 'opus', agentId: next }))
+  const items = (statuses: Record<string, string>) => ['A', 'B', 'C'].map(content => ({ content, status: statuses[content] ?? 'completed' }))
+
+  await writeTodos($, { items: items({ A: 'in_progress', B: 'pending' }) })
+  next = 'b1'
+  await spawn($, 'Review A', 'conductor:reviewer')
+  await runTurn($, 'b1', 'claude-opus-5-5', 'high', 'STATUS ISSUES')
+  await writeTodos($, { items: items({ B: 'in_progress' }) })
+  next = 'b2'
+  await spawn($, 'Watch B', 'general-purpose')
+  await writeTodos($, { items: items({}) })
+  await openPane($)
+
+  for (const bodyColumns of [120, 40]) {
+    const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE, props: { ...PANE.props, bodyColumns } })
+    expect(await ui.find({ type: 'Text', text: 'DONE · 3 · 1 ✗ · 1 running' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '1 agent ✗' })).toBeDefined()
+    expect(await ui.find({ key: 'agent:b1:toggle' })).toBeDefined()
+    expect(await ui.find({ key: 'agent:b2:toggle' })).toBeDefined()
+    expect(await ui.find({ key: 'todo:C:toggle' })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('a plugin agent listed in its manifest gets the routing check and the read-only guard', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  quietHost(on, conductorTree(), [' M a.ts\n', ' M a.ts\n?? b.ts\n'])
+  on('agent.list', () => ({ value: [{ id: 'r1', type: 'conductor:reviewer', description: 'Review unit 1', status: 'completed' }] }))
+  on('agent.spawn', () => ({ model: 'sonnet', agentId: 'r1' }))
+
+  await spawn($, 'Review unit 1', 'conductor:reviewer')
+  await runTurn($, 'r1', 'claude-sonnet-5-5', 'medium', 'STATUS PASS')
+  await openPane($)
+
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  expect((await ui.find({ key: 'agent:r1:toggle' }))?.text).toMatch(/^⚠ reviewer {2}Review unit 1/)
+  expect(await ui.find({ type: 'Text', text: /⚠ ran Sonnet 5\.5 medium; its definition asks for opus high/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /⚠ 1 file changed in the tree while this read-only agent ran/ })).toBeDefined()
+})
+
+async function routedRow(on: On, $: Engine, type: string, files: Record<string, string>, env?: Record<string, string>, links?: Record<string, string>) {
+  mock.clock(on, { now: 1_000_000 })
+  quietHost(on, files, [''], env, undefined, links)
+  on('agent.list', () => ({ value: [{ id: 'p1', type, description: 'Run it', status: 'completed' }] }))
+  on('agent.spawn', () => ({ model: 'haiku', agentId: 'p1' }))
+  await spawn($, 'Run it', type)
+  await runTurn($, 'p1', 'claude-haiku-5-5', 'low', 'STATUS PASS')
+  await openPane($)
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  return (await ui.find({ type: 'Text', text: /^\s*Haiku 5\.5 · low/ }))?.text ?? ''
+}
+
+const RUNNER = '---\nname: runner\nmodel: haiku\neffort: low\n---\n'
+
+test("a plugin agent in the default agents/ folder is found by its frontmatter name, not its file name", async ($, on) => {
+  const files = {
+    '/home/me/.claude/plugins/installed_plugins.json': installed({ 'lab@kit': '/plugins/lab' }),
+    '/plugins/lab/.claude-plugin/plugin.json': '{ "name": "lab" }',
+    '/plugins/lab/agents/other.md': '---\nname: other\nmodel: opus\n---\n',
+    '/plugins/lab/agents/run-things.md': RUNNER,
+  }
+  expect(await routedRow(on, $, 'lab:runner', files)).toMatch(/low ✓/)
+})
+
+test('an agent of a plugin that is not installed gets no routing check and no warning', async ($, on) => {
+  const row = await routedRow(on, $, 'ghost:runner', { '/home/me/.claude/plugins/installed_plugins.json': installed({ 'lab@kit': '/plugins/lab' }) })
+  expect(row).toMatch(/Haiku 5\.5 · low ·/)
+  expect(row).not.toMatch(/✓/)
+})
+
+test('CLAUDE_CONFIG_DIR moves where installed plugins are read from', async ($, on) => {
+  const files = {
+    '/home/me/.claude/plugins/installed_plugins.json': installed({ 'lab@kit': '/decoy' }),
+    '/decoy/agents/runner.md': '---\nname: runner\nmodel: opus\neffort: high\n---\n',
+    '/cfg/plugins/installed_plugins.json': installed({ 'lab@kit': '/plugins/lab' }),
+    '/plugins/lab/agents/runner.md': RUNNER,
+  }
+  expect(await routedRow(on, $, 'lab:runner', files, { HOME: '/home/me', CLAUDE_CONFIG_DIR: '/cfg' })).toMatch(/low ✓/)
+})
+
+test('manifest agent paths outside the plugin, by .., absolute path, symbolic link or size, are never read', async ($, on) => {
+  // Each file would route the row (✓) if it were read.
+  const outside = RUNNER
+  const files = {
+    '/home/me/.claude/plugins/installed_plugins.json': installed({ 'lab@kit': '/plugins/lab' }),
+    '/plugins/lab/.claude-plugin/plugin.json': JSON.stringify({ agents: ['../evil/runner.md', '/evil/runner.md', './linked/runner.md', './big.md'] }),
+    '/plugins/evil/runner.md': outside,
+    '/evil/runner.md': outside,
+    '/plugins/lab/big.md': `${outside}${'x'.repeat(300 * 1024)}`,
+  }
+  expect(await routedRow(on, $, 'lab:runner', files, undefined, { '/plugins/lab/linked': '/evil' })).not.toMatch(/✓/)
+})
+
+const handBack = ($: Engine, agentId: string, message: string) =>
+  $.tool.call({ tool: 'SubagentHandback', message, agentId } as unknown as Parameters<Engine['tool']['call']>[0])
+
+test('a report handed back through SubagentHandback gives the verdict, and the run reads as done though the list still says running', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  quietHost(on)
+  on('agent.list', () => ({ value: [{ id: 'h1', type: 'conductor:implementer', description: 'Build unit 2', status: 'running' }] }))
+  on('agent.spawn', () => ({ model: 'sonnet', agentId: 'h1' }))
+
+  await spawn($, 'Build unit 2', 'conductor:implementer')
+  await runTurn($, 'h1', 'claude-sonnet-5-5', 'medium', 'Working on it.')
+  await openPane($)
+  let ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: 'AGENTS · 0 running' })).toBeDefined()
+  await ui.unmount()
+
+  await spawn($, 'Build unit 2', 'conductor:implementer', { resume: { agentId: 'h1' } })
+  await $.turn.start({ turnId: 't-h1b', agentId: 'h1', text: 'go on' })
+  await openPane($)
+  await openPane($)
+  ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: 'AGENTS · 1 running' })).toBeDefined()
+  await ui.unmount()
+
+  await handBack($, 'h1', 'STATUS     ISSUES\nDID  a.ts')
+  await $.turn.complete({ turnId: 't-h1b', agentId: 'h1', answer: '', durationMs: 1, isAborted: false, reason: 'answer' })
+  await openPane($)
+  await openPane($)
+  ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: 'ISSUES' })).toBeDefined()
+  expect((await ui.find({ key: 'agent:h1:toggle' }))?.text).toMatch(/^✓ implementer {2}Build unit 2/)
+  expect(await ui.find({ key: 'agent:h1:stop' })).toBeUndefined()
+})
+
+test('a resumed delegate shows the verdict of its newest run', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  quietHost(on)
+  on('agent.list', () => ({ value: [{ id: 'v1', type: 'conductor:reviewer', description: 'Review unit 3', status: 'completed' }] }))
+  on('agent.spawn', () => ({ model: 'opus', agentId: 'v1' }))
+
+  await spawn($, 'Review unit 3', 'conductor:reviewer')
+  await runTurn($, 'v1', 'claude-opus-5-5', 'high', 'STATUS ISSUES')
+  await spawn($, 'Review unit 3', 'conductor:reviewer', { resume: { agentId: 'v1' } })
+  await runTurn($, 'v1', 'claude-opus-5-5', 'high', 'STATUS PASS')
+  await openPane($)
+
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: 'PASS' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'ISSUES' })).toBeUndefined()
+})
+
+const DAY = 86_400_000
+
+test('the todo list is kept in the store under the session, and a restart of that session gets it back', async ($, on) => {
+  mock.clock(on, { now: 10 * DAY })
+  const store: Record<string, unknown> = {}
+  quietHost(on, {}, [''], undefined, undefined, {}, { store, sessionId: 's1' })
+  on('agent.list', () => ({ value: [] }))
+  await writeTodos($, { title: 'feature', items: STEPS })
+  expect(store['todos:s1']).toEqual({ savedAt: 10 * DAY, todos: { title: 'feature', items: expect.any(Array) } })
+  expect((store['todos:s1'] as { todos: { items: unknown[] } }).todos.items).toHaveLength(4)
+})
+
+const SAVED = { savedAt: 10 * DAY - 60_000, todos: { title: 'feature', items: [{ content: 'Build in small units', status: 'in_progress', startedAt: 10 * DAY - 60_000 }] } }
+const startSession = ($: Engine) => $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+
+test('a new process of the same session restores the stored list; entries older than 7 days are pruned', async ($, on) => {
+  mock.clock(on, { now: 10 * DAY })
+  const store: Record<string, unknown> = { 'todos:s1': SAVED, 'todos:old': { ...SAVED, savedAt: 2 * DAY }, other: 1 }
+  quietHost(on, {}, [''], undefined, undefined, {}, { store, sessionId: 's1' })
+  on('agent.list', () => ({ value: [] }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await startSession($)
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /FEATURE · 0 of 1 done/ })).toBeDefined()
+  expect(Object.keys(store).sort()).toEqual(['other', 'todos:s1'])
+})
+
+test('another session gets no stored list', async ($, on) => {
+  mock.clock(on, { now: 10 * DAY })
+  quietHost(on, {}, [''], undefined, undefined, {}, { store: { 'todos:s1': SAVED }, sessionId: 's2' })
+  on('agent.list', () => ({ value: [] }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await startSession($)
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /FEATURE/ })).toBeUndefined()
+})
+
+const CONDUCTOR = '/plugins/conductor'
+const QUEUE_TOOL = `${CONDUCTOR}/skills/conductor/tools/queue.mjs`
+// Captured from conductor's queue.mjs status --json: an orphan's lock holder unknown, an "unknown" holder unread.
+const REAL_STATUS = {
+  "protocol": 1,
+  "queues": [
+    {
+      "name": "e2e",
+      "slots": 1,
+      "slotsSource": "files",
+      "holders": [
+        {
+          "slot": 0,
+          "pid": null,
+          "cwd": null,
+          "command": null,
+          "ageMs": null,
+          "state": "orphan",
+          "cpuPct": null,
+          "memKb": null
+        }
+      ],
+      "waiters": []
+    },
+    {
+      "name": "tests",
+      "slots": 2,
+      "slotsSource": "records",
+      "holders": [
+        {
+          "slot": 0,
+          "pid": 500788,
+          "cwd": "/tmp",
+          "command": "sh -c while :; do :; done",
+          "ageMs": 16346,
+          "state": "busy",
+          "cpuPct": 101,
+          "memKb": 50152
+        },
+        {
+          "slot": 1,
+          "pid": 501210,
+          "cwd": "/tmp",
+          "command": "sleep 60",
+          "ageMs": 8745,
+          "state": "idle",
+          "cpuPct": 0,
+          "memKb": 50544
+        }
+      ],
+      "waiters": [
+        {
+          "ticket": "gate-1792752271593-501700",
+          "pid": 501700,
+          "cwd": "/tmp",
+          "command": "sleep 32",
+          "priority": "gate",
+          "rank": 0,
+          "waitedMs": 723
+        },
+        {
+          "ticket": "normal-1792752271593-501699",
+          "pid": 501699,
+          "cwd": "/tmp",
+          "command": "sleep 31",
+          "priority": "normal",
+          "rank": 1,
+          "waitedMs": 723
+        }
+      ]
+    }
+  ],
+  "machine": {
+    "cores": 8,
+    "load1": 1.39,
+    "memAvailKb": 17536892,
+    "memTotalKb": 22581312
+  }
+}
+const REAL_STATUS_UNKNOWN = {
+  "protocol": 1,
+  "queues": [
+    {
+      "name": "e2e",
+      "slots": 1,
+      "slotsSource": "files",
+      "holders": [
+        {
+          "slot": 0,
+          "pid": null,
+          "cwd": null,
+          "command": null,
+          "ageMs": null,
+          "state": "orphan",
+          "cpuPct": null,
+          "memKb": null
+        }
+      ],
+      "waiters": []
+    },
+    {
+      "name": "movetest",
+      "slots": 1,
+      "slotsSource": "records",
+      "holders": [
+        {
+          "slot": 0,
+          "pid": 505839,
+          "cwd": "/tmp",
+          "command": "sleep 120",
+          "ageMs": 1079,
+          "state": "idle",
+          "cpuPct": 0,
+          "memKb": 50512
+        }
+      ],
+      "waiters": [
+        {
+          "ticket": "normal-1792752352759-505903",
+          "pid": 505903,
+          "cwd": "/tmp",
+          "command": "sleep 41",
+          "priority": "normal",
+          "rank": 0,
+          "waitedMs": 577
+        },
+        {
+          "ticket": "normal-1792752352821-505921",
+          "pid": 505921,
+          "cwd": "/tmp",
+          "command": "sleep 42",
+          "priority": "normal",
+          "rank": 1,
+          "waitedMs": 515
+        }
+      ]
+    },
+    {
+      "name": "tests",
+      "slots": 2,
+      "slotsSource": "records",
+      "holders": [
+        {
+          "slot": 0,
+          "pid": 500788,
+          "cwd": "/tmp",
+          "command": "sh -c while :; do :; done",
+          "ageMs": 98374,
+          "state": "busy",
+          "cpuPct": 100,
+          "memKb": 50152
+        },
+        {
+          "slot": 1,
+          "pid": 504460,
+          "cwd": "/tmp",
+          "command": "sleep 31",
+          "ageMs": 30830,
+          "state": "unknown",
+          "cpuPct": null,
+          "memKb": null
+        }
+      ],
+      "waiters": [
+        {
+          "ticket": "normal-1792752289603-502597",
+          "pid": 502597,
+          "cwd": "/tmp",
+          "command": "sleep 33",
+          "priority": "normal",
+          "rank": 0,
+          "waitedMs": 64741
+        }
+      ]
+    }
+  ],
+  "machine": {
+    "cores": 8,
+    "load1": 1.53,
+    "memAvailKb": 17449652,
+    "memTotalKb": 22581312
+  }
+}
+
+// The same shape, with cwds that exercise place and the "you" mark.
+const QUEUE_FIXTURE = {
+  protocol: 1,
+  queues: [
+    {
+      name: 'tests',
+      slots: 2,
+      slotsSource: 'env',
+      holders: [
+        { slot: 0, pid: 123, cwd: '/workspace/.worktrees/q-plain', command: 'pnpm test', ageMs: 240_000, state: 'busy', cpuPct: 340, memKb: 838_861 },
+        { slot: 1, pid: 124, cwd: '/repo', command: 'pnpm test:changed', ageMs: 60_000, state: 'idle', cpuPct: 0, memKb: 314_573 },
+      ],
+      waiters: [
+        { ticket: 'w2', pid: 457, cwd: '/repo/apps/web', command: 'pnpm build', priority: 'normal', rank: 1, waitedMs: 5_000 },
+        { ticket: 'w1', pid: 456, cwd: '/workspace/.worktrees/rd-441', command: 'pnpm typecheck', priority: 'gate', rank: 0, waitedMs: 65_000 },
+      ],
+    },
+    {
+      name: 'e2e',
+      slots: 1,
+      slotsSource: 'files',
+      holders: [{ slot: 0, pid: null, cwd: null, command: null, ageMs: null, state: 'orphan', cpuPct: null, memKb: null }],
+      waiters: [],
+    },
+    {
+      name: 'build',
+      slots: 1,
+      slotsSource: 'records',
+      holders: [{ slot: 0, pid: 130, cwd: '/workspace/.worktrees/q-plain', command: 'pnpm build', ageMs: 30_000, state: 'unknown', cpuPct: null, memKb: null }],
+      waiters: [],
+    },
+  ],
+  machine: { cores: 8, load1: 12.3, memAvailKb: 8_388_608, memTotalKb: 21_000_000 },
+}
+
+type QueueAnswer = { exitCode: number; stdout: string; stderr?: string }
+
+// The session (root 100) runs 124 through its shell 110; 457 and 999, in the same folder, belong to another session.
+const QUEUE_PS = [
+  '  100     1   100  0.0 90000 claude',
+  `  110   100   110  0.0  4096 /bin/bash -c source /s.sh && eval 'pnpm test:changed' < /dev/null`,
+  '  124   110   110  0.0  4096 node vitest',
+  '  900     1   900  0.0 90000 claude',
+  '  457   900   457  0.0  4096 pnpm build',
+  '  999   900   999  0.0  4096 pnpm lint',
+].join('\n')
+
+function queueHost(
+  on: On,
+  answers: Record<string, QueueAnswer> = {},
+  opts: { isInstalled?: boolean; statuses?: (string | undefined)[]; status?: unknown; installs?: Record<string, string>; hasTool?: boolean; stats?: string[] } = {},
+) {
+  const calls: string[][] = []
+  const installs = opts.installs ?? { 'conductor@agent-kit': CONDUCTOR }
+  const files: Record<string, string> =
+    opts.isInstalled === false
+      ? {}
+      : {
+          '/home/me/.claude/plugins/installed_plugins.json': installed(installs),
+          ...(opts.hasTool === false ? {} : Object.fromEntries(Object.values(installs).map(root => [`${root}/skills/conductor/tools/queue.mjs`, '']))),
+        }
+  quietHost(on, files, [''], undefined, undefined, {}, {
+    statuses: opts.statuses,
+    stats: opts.stats,
+    ps: QUEUE_PS,
+    node: args => {
+      if (!args[0]?.endsWith('/skills/conductor/tools/queue.mjs')) return undefined
+      calls.push(args.slice(1))
+      if (args[1] === 'status') return { exitCode: 0, stdout: JSON.stringify(typeof opts.status === 'function' ? opts.status() : (opts.status ?? QUEUE_FIXTURE)) }
+      return answers[args[1] ?? ''] ?? { exitCode: 0, stdout: '{"ok":true}' }
+    },
+  })
+  on('agent.list', () => ({ value: [] }))
+  return calls
+}
+
+test('the QUEUE section lists holders with their state and waiters in rank order, only runs in this session\'s process tree marked', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const statuses: (string | undefined)[] = []
+  queueHost(on, {}, { statuses })
+  await writeTodos($, { items: [{ content: 'Ship', status: 'in_progress' }] })
+  await openPane($)
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE, props: { ...PANE.props, bodyColumns: 72 } })
+  const lines = textOf(await ui.find({ type: 'Box' })).split('\n')
+  const at = lines.findIndex(l => l.startsWith('QUEUE'))
+  expect(lines.slice(at, at + 7)).toEqual([
+    'QUEUE · tests 2/2 · e2e 1/1 · build 1/1 · load 12 / 8 cores · 8.0G free',
+    '● tests  q-plain pnpm test 4m00s 3.4 cores · 819M [stop]',
+    '● tests  repo pnpm test:changed you idle 1m00s 0.0 cores · 307M [stop]',
+    '● e2e  (process gone) orphan',
+    '◌ build  q-plain pnpm build 30s [stop]',
+    '○ #1 tests  rd-441 pnpm typecheck gate waiting 1m05s [top] [↑] [↓]',
+    '○ #2 tests  web pnpm build waiting 5s [top] [↑] [↓]',
+  ])
+  expect(await ui.find({ key: 'queue:e2e:0:stop' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'idle' })).toMatchObject({ props: { color: 'warning' } })
+  expect(await ui.find({ type: 'Text', text: 'orphan' })).toMatchObject({ props: { color: 'warning' } })
+  expect(statuses.at(-1)).toBe('◆ 0/1 Ship · queue 4/4 +2')
+})
+
+test('stop asks first: a yes runs queue stop and says what it did, a no or a dismissal runs nothing', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const calls = queueHost(on, { stop: { exitCode: 0, stdout: '{"ok":true,"stopped":3,"killed":1}' } })
+  let answer: string | undefined = 'Keep it'
+  const asked: string[] = []
+  on('tool.call', { tool: 'AskUserQuestion' }, (_$, e) => {
+    const question = (e.questions[0] as { question: string }).question
+    asked.push(question)
+    return answer === undefined ? { deny: 'dismissed' } : { result: { questions: e.questions, answers: { [question]: answer } } }
+  })
+  await openPane($)
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+
+  await ui.press({ key: 'queue:tests:0:stop' })
+  answer = undefined
+  await ui.press({ key: 'queue:tests:0:stop' })
+  expect(calls.filter(c => c[0] === 'stop')).toEqual([])
+  expect(asked[0]).toBe('Stop `pnpm test` in tests slot 0 (q-plain)?')
+
+  answer = 'Stop it'
+  await ui.press({ key: 'queue:tests:0:stop' })
+  expect(calls.filter(c => c[0] === 'stop')).toEqual([['stop', 'tests', '0']])
+  expect(await ui.find({ type: 'Text', text: 'stop tests slot 0: 3 processes stopped, 1 killed' })).toBeDefined()
+})
+
+test('a slot that changed hands while the question was open is not stopped', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  let isAsked = false
+  const [tests, ...rest] = QUEUE_FIXTURE.queues
+  const taken = { ...QUEUE_FIXTURE, queues: [{ ...tests!, holders: [{ ...tests!.holders[0]!, pid: 999, command: 'pnpm lint' }, tests!.holders[1]!] }, ...rest] }
+  const calls = queueHost(on, {}, { status: () => (isAsked ? taken : QUEUE_FIXTURE) })
+  on('tool.call', { tool: 'AskUserQuestion' }, (_$, e) => {
+    isAsked = true
+    const question = (e.questions[0] as { question: string }).question
+    return { result: { questions: e.questions, answers: { [question]: 'Stop it' } } }
+  })
+  await openPane($)
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  await ui.press({ key: 'queue:tests:0:stop' })
+  expect(calls.filter(c => c[0] === 'stop')).toEqual([])
+  expect(await ui.find({ type: 'Text', text: 'tests slot 0 changed hands; not stopped' })).toBeDefined()
+})
+
+test('a conductor without queue.mjs, or one from another marketplace, runs no queue call', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const reads: string[] = []
+  const calls = queueHost(on, {}, { installs: { 'conductor@other': '/plugins/other', 'conductor@agent-kit': '/plugins/old-conductor' }, hasTool: false, stats: reads })
+  await openPane($)
+  await openPane($)
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /QUEUE/ })).toBeUndefined()
+  expect(calls).toEqual([])
+  expect(reads.filter(p => p.endsWith('queue.mjs'))).toEqual(['/plugins/old-conductor/skills/conductor/tools/queue.mjs'])
+})
+
+test('an idle queue draws no section and leaves the empty state', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const idle = { ...QUEUE_FIXTURE, queues: QUEUE_FIXTURE.queues.map(q => ({ ...q, holders: [], waiters: [] })) }
+  queueHost(on, {}, { status: idle })
+  await openPane($)
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /QUEUE/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Nothing running/ })).toBeDefined()
+})
+
+test('the move buttons run queue move and say so', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const calls = queueHost(on, { move: { exitCode: 0, stdout: '{"ok":true}' } })
+  await openPane($)
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  await ui.press({ key: 'queue:w2:top' })
+  await ui.press({ key: 'queue:w1:down' })
+  expect(calls.filter(c => c[0] === 'move')).toEqual([
+    ['move', 'w2', 'top'],
+    ['move', 'w1', 'down'],
+  ])
+  expect(await ui.find({ type: 'Text', text: 'move pnpm typecheck down: done' })).toBeDefined()
+})
+
+test('without the conductor plugin there is no QUEUE section and no queue call', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const calls = queueHost(on, {}, { isInstalled: false })
+  await openPane($)
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /QUEUE/ })).toBeUndefined()
+  expect(calls).toEqual([])
+})
+
+test('under 46 columns the QUEUE section is its header and holders, with waiters counted', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  queueHost(on)
+  await openPane($)
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE, props: { ...PANE.props, bodyColumns: 40 } })
+  const lines = textOf(await ui.find({ type: 'Box' })).split('\n')
+  const at = lines.findIndex(l => l.startsWith('QUEUE'))
+  expect(lines.slice(at, at + 6)).toEqual([
+    'QUEUE · tests 2/2 · e2e 1/1 · build 1/1 · load 12 / 8 cores · 8.0G free',
+    '● tests  q-plain pnpm test [■]',
+    '● tests  repo pnpm test:changed you idle [■]',
+    '● e2e  (process gone) orphan',
+    '◌ build  q-plain pnpm build [■]',
+    '+2 waiting',
+  ])
+  expect(await ui.find({ key: 'queue:w1:top' })).toBeUndefined()
+})
+
+test("a failed queue command shows the tool's reason, though it exits 1 with nothing on stderr", async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  queueHost(on, {
+    move: { exitCode: 1, stdout: '{"ok":false,"reason":"a normal run can\'t pass a gate run"}', stderr: '' },
+    stop: { exitCode: 1, stdout: '{"ok":false,"reason":"no live holder in slot 0 of tests"}', stderr: '' },
+  })
+  on('tool.call', { tool: 'AskUserQuestion' }, (_$, e) => {
+    const question = (e.questions[0] as { question: string }).question
+    return { result: { questions: e.questions, answers: { [question]: 'Stop it' } } }
+  })
+  await openPane($)
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE })
+  await ui.press({ key: 'queue:w2:up' })
+  expect(await ui.find({ type: 'Text', text: "move pnpm build up: not done (a normal run can't pass a gate run)" })).toBeDefined()
+  await ui.press({ key: 'queue:tests:0:stop' })
+  expect(await ui.find({ type: 'Text', text: 'stop tests slot 0: not done (no live holder in slot 0 of tests)' })).toBeDefined()
+})
+
+test('the real status shapes draw with no made-up zeros: an orphan without a process has no stop, an unread holder no usage', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  queueHost(on, {}, { status: REAL_STATUS_UNKNOWN })
+  await openPane($)
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE, props: { ...PANE.props, bodyColumns: 72 } })
+  const lines = textOf(await ui.find({ type: 'Box' })).split('\n')
+  const at = lines.findIndex(l => l.startsWith('QUEUE'))
+  expect(lines.slice(at, at + 8)).toEqual([
+    'QUEUE · e2e 1/1 · movetest 1/1 · tests 2/2 · load 2 / 8 cores · 16.6G free',
+    '● e2e  (process gone) orphan',
+    '● movetest  tmp sleep 120 idle 1s 0.0 cores · 49M [stop]',
+    '● tests  tmp sh -c while :; do :; done 1m38s 1.0 cores · 49M [stop]',
+    '◌ tests  tmp sleep 31 30s [stop]',
+    '○ #1 movetest  tmp sleep 41 waiting 0s [top] [↑] [↓]',
+    '○ #2 movetest  tmp sleep 42 waiting 0s [top] [↑] [↓]',
+    '○ #1 tests  tmp sleep 33 waiting 1m04s [top] [↑] [↓]',
+  ])
+  expect(lines.join('\n')).not.toMatch(/0\.0G/)
+})
+
+test('a free figure the machine could not read is left out of the header; an orphan whose process is known can be stopped', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const known = { slot: 0, pid: 777, cwd: '/tmp', command: 'pnpm e2e', ageMs: null, state: 'orphan', cpuPct: null, memKb: null }
+  const status = { ...REAL_STATUS, queues: [{ ...REAL_STATUS.queues[0], holders: [known] }], machine: { ...REAL_STATUS.machine, memAvailKb: null, memTotalKb: null } }
+  queueHost(on, {}, { status })
+  await openPane($)
+  const ui = await $.ui.mount({ plugin: 'session-activity', surface: 'terminal', ...PANE, props: { ...PANE.props, bodyColumns: 72 } })
+  const lines = textOf(await ui.find({ type: 'Box' })).split('\n')
+  const at = lines.findIndex(l => l.startsWith('QUEUE'))
+  expect(lines.slice(at, at + 2)).toEqual(['QUEUE · e2e 1/1 · load 1 / 8 cores', '● e2e  tmp pnpm e2e orphan [stop]'])
 })

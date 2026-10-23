@@ -1,4 +1,4 @@
-import type { AgentRow, AgentStatusWord, BranchHealth, Orphan, ShellTask, TodoItem, TodoList, Verdict } from '../types'
+import type { AgentRow, AgentStatusWord, BranchHealth, Orphan, QueueStatus, ShellTask, SpawnInfo, TodoItem, TodoList, Verdict } from '../types'
 
 export type ProcRow = { pid: number; ppid: number; pgid: number; cpu: number; rssKb: number; args: string }
 
@@ -310,35 +310,97 @@ export const usageTokens = (u: {
 
 const TODO_STATUSES: readonly string[] = ['pending', 'in_progress', 'completed', 'skipped']
 
-export type TodoInput = { title?: string; link?: string; items: Pick<TodoItem, 'content' | 'status' | 'note'>[] }
+export type TodoInput = { title?: string; link?: string; items: Pick<TodoItem, 'content' | 'status' | 'note' | 'ticket'>[] }
 
 export function todoInputError(input: Record<string, unknown>): string | undefined {
   if (!Array.isArray(input.items)) return '`items` must be an array of { content, status, note? }'
   for (const [i, item] of input.items.entries()) {
     if (typeof item?.content !== 'string' || item.content.trim() === '') return `items[${i}].content must be non-empty text`
     if (!TODO_STATUSES.includes(item.status)) return `items[${i}].status must be one of ${TODO_STATUSES.join(', ')}`
+    if (item.ticket !== undefined && typeof item.ticket !== 'string') return `items[${i}].ticket must be text, as #123, owner/repo#123 or a URL`
   }
   return undefined
 }
 
 export function applyTodos(prev: TodoList | undefined, input: TodoInput, now: number): TodoList {
-  const items = input.items.map(({ content, status, note }) => {
+  const items = input.items.map(({ content, status, note, ticket }) => {
     const startedAt = status === 'pending' ? undefined : (prev?.items.find(p => p.content === content)?.startedAt ?? (status === 'in_progress' ? now : undefined))
-    return { content, status, ...(note ? { note } : {}), ...(startedAt === undefined ? {} : { startedAt }) }
+    return { content, status, ...(note ? { note } : {}), ...(ticket ? { ticket } : {}), ...(startedAt === undefined ? {} : { startedAt }) }
   })
   const title = input.title ?? prev?.title
   const link = input.link ?? prev?.link
   return { ...(title ? { title } : {}), ...(link ? { link } : {}), items }
 }
 
-export function currentTodo(list: TodoList): string | undefined {
+export function currentItem(list: TodoList): TodoItem | undefined {
   const active = list.items.filter(i => i.status === 'in_progress')
-  return active.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))[0]?.content
+  return active.sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0))[0]
 }
 
-// The report shape conductor's delegates end with: `STATUS  PASS | ISSUES | BLOCKED`, or a verifier's FAIL.
+export const currentTodo = (list: TodoList) => currentItem(list)?.content
+
+export function groupTodos<T extends Pick<TodoItem, 'status'>>(items: readonly T[]) {
+  return {
+    now: items.filter(i => i.status === 'in_progress'),
+    next: items.filter(i => i.status === 'pending'),
+    done: items.filter(i => i.status === 'completed' || i.status === 'skipped'),
+  }
+}
+
+// `owner/repo` of a GitHub URL: an issue link, or a remote over https or ssh.
+export const repoOf = (url: string | undefined) => {
+  const m = url === undefined ? null : /github\.com[/:](?!(?:orgs|users|enterprises)\/)([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:[/?#]|$)/.exec(url)
+  return m ? `${m[1]}/${m[2]}` : undefined
+}
+
+// The repo a bare `#N` belongs to: the list link's when it is an issue or PR, else the branch's origin.
+export const contextRepo = (link: string | undefined, branchRepo: string | undefined) =>
+  (link && /github\.com\/[^/]+\/[^/]+\/(?:issues|pull)\/\d+/.test(link) ? repoOf(link) : undefined) ?? branchRepo
+
+export type Ticket = { label: string; href?: string }
+
+// A leading `#12`, `owner/repo#12`, or a GitHub issue or PR URL. An owner-less `name#12` is no ticket, so `C#9` stays text.
+// shortcut: a leading `#1 priority` still reads as ticket #1; require the `ticket` field if that bites.
+const TICKET = /^(?:https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(issues|pull)\/(\d+)\S*|(?:([\w.-]+)\/([\w.-]+))?#(\d+)\b)/
+
+function readTicket(text: string, repo: string | undefined): { ticket: Ticket; length: number } | undefined {
+  const m = TICKET.exec(text)
+  if (!m) return undefined
+  const [ctxOwner, ctxName] = repo?.split('/') ?? []
+  const owner = m[1] ?? m[5] ?? ctxOwner
+  const name = m[2] ?? m[6] ?? ctxName
+  const n = m[4] ?? m[7]
+  const label = !name || (name === ctxName && owner === ctxOwner) ? `#${n}` : `${name}#${n}`
+  const href = owner && name ? `https://github.com/${owner}/${name}/${m[3] ?? 'issues'}/${n}` : undefined
+  return { ticket: { label, ...(href ? { href } : {}) }, length: m[0].length }
+}
+
+// An item's ticket (its `ticket` field, else one leading its text) and the text left to show.
+export function ticketOf(item: Pick<TodoItem, 'content' | 'ticket'>, repo?: string): { ticket?: Ticket; text: string } {
+  const lead = readTicket(item.content, repo)
+  const raw = item.ticket?.trim()
+  const given = raw ? (readTicket(raw, repo)?.ticket ?? (/^https?:\/\//.test(raw) ? urlTicket(raw) : { label: raw })) : undefined
+  const ticket = given ?? lead?.ticket
+  const text = lead && (!given || lead.ticket.label === given.label) ? item.content.slice(lead.length).replace(/^[\s:·—–-]+/, '') : item.content
+  return { ...(ticket ? { ticket } : {}), text }
+}
+
+// A ticket URL GitHub's forms miss (Linear, Jira, a discussion): its last path segment links to it.
+const urlTicket = (url: string): Ticket => ({ label: url.replace(/[?#].*$/, '').replace(/\/+$/, '').split('/').pop() ?? url, href: url })
+
+export function todoTitle(item: Pick<TodoItem, 'content' | 'ticket'>, repo?: string): string {
+  const { ticket, text } = ticketOf(item, repo)
+  return ticket ? `${ticket.label} ${text}` : text
+}
+
+// The report shape conductor's delegates end with: `STATUS  PASS | ISSUES | BLOCKED`, or a verifier's FAIL;
+// also `Status:`, bold, quoted, dashed, or a table row.
 export const parseVerdict = (answer: string) =>
-  /^[*_\s]*STATUS[*_:\s]+(PASS\+NOTES|PASS|ISSUES|BLOCKED|FAIL)\b/m.exec(answer)?.[1] as Verdict | undefined
+  /^[*_\s>|`#-]*(?:STATUS|Status)[*_:\s|`=—–-]+(PASS\+NOTES|PASS|ISSUES|BLOCKED|FAIL)\b/m.exec(answer)?.[1] as Verdict | undefined
+
+// The list can show an agent running or idle after its run ended (a hand-back ends it); the run's own end wins.
+export const settleFinished = <A extends AgentSnapshot>(list: readonly A[], spawns: Readonly<Record<string, Pick<SpawnInfo, 'isFinished'>>>) =>
+  list.map(a => (spawns[a.id]?.isFinished && isAgentActive(a.status) ? { ...a, status: 'completed' as const } : a))
 
 export function parseAgentDef(text: string): { model?: string; effort?: string; isReadOnly: boolean } {
   const lines = (/^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? '').split(/\r?\n/)
@@ -363,19 +425,104 @@ export function parseAgentDef(text: string): { model?: string; effort?: string; 
   return { ...(model ? { model } : {}), ...(effort ? { effort } : {}), isReadOnly }
 }
 
+export const agentName = (text: string) =>
+  /^name:\s*["']?([^"'\r\n]+?)["']?\s*$/m.exec(/^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? '')?.[1]
+
+type PluginInstall = { scope?: string; projectPath?: string; installPath?: string }
+
+// installed_plugins.json: `{ plugins: { "<plugin>@<marketplace>": [install, ...] } }`; an older file holds one install, not a list.
+export function pluginInstallPath(installed: unknown, plugin: string, cwd: string): string | undefined {
+  const plugins = (installed as { plugins?: Record<string, PluginInstall | PluginInstall[]> } | null)?.plugins ?? {}
+  const installs = Object.entries(plugins)
+    .filter(([key]) => {
+      const at = key.lastIndexOf('@')
+      return (at < 0 ? key : key.slice(0, at)) === plugin || key === plugin
+    })
+    .flatMap(([, v]) => [v].flat())
+  const inProject = installs.find(i => i.projectPath && (cwd === i.projectPath || cwd.startsWith(`${i.projectPath}/`)))
+  return (inProject ?? installs.find(i => i.scope === undefined || i.scope === 'user'))?.installPath
+}
+
+// Where a plugin's agents live, relative to its root: `agents/` always, plus each `./` file or folder its manifest lists.
+// The caller still checks where each lands, as a symbolic link can lead out of the root.
+export function pluginAgentPaths(manifest: unknown): string[] {
+  const listed = [(manifest as { agents?: unknown } | null)?.agents ?? []].flat().filter((p): p is string => typeof p === 'string')
+  const inside = listed.filter(p => p.startsWith('./') && !p.split('/').includes('..'))
+  return ['agents', ...inside.map(p => p.slice(2).replace(/\/$/, ''))]
+}
+
 export const modelMatches = (want: string, ran: string) => want === 'inherit' || ran.includes(want)
 
 export const porcelainLines = (stdout: string) => stdout.split('\n').filter(Boolean)
 
 export const newChanges = (before: readonly string[], stdout: string) => porcelainLines(stdout).filter(l => !before.includes(l)).length
 
-// BRANCH_SCRIPT's four lines: branch, trunk, commits behind trunk, changed files.
+// Runs `fn` unless the last call under `guard` is still running; a skipped call resolves to undefined.
+export async function exclusive<R>(guard: { isRunning: boolean }, fn: () => Promise<R>): Promise<R | undefined> {
+  if (guard.isRunning) return undefined
+  guard.isRunning = true
+  try {
+    return await fn()
+  } finally {
+    guard.isRunning = false
+  }
+}
+
+// `49M` under a gigabyte, `16.7G` from there.
+export const shortMemory = (kb: number) => (kb < 1048576 ? `${Math.round(kb / 1024)}M` : `${(kb / 1048576).toFixed(1)}G`)
+
+// No reading at all draws nothing; a half reading draws its missing half as `?`, never a zero.
+export const holderUsage = (h: { cpuPct: number | null; memKb: number | null }) =>
+  h.cpuPct === null && h.memKb === null ? undefined : `${h.cpuPct === null ? '?' : cores(h.cpuPct)} · ${h.memKb === null ? '?' : shortMemory(h.memKb)}`
+
+// queue.mjs answers JSON on stdout whatever its exit code (a refusal is exit 1, `{ ok: false, reason }`).
+export function queueOutcome(what: string, out: { exitCode: number; stdout: string; stderr: string }): string {
+  let r: { ok?: boolean; stopped?: number; killed?: number; reason?: string; note?: string }
+  try {
+    r = JSON.parse(out.stdout)
+  } catch {
+    return `${what}: failed: ${out.stderr.trim() || `exit ${out.exitCode}`}`
+  }
+  if (!r?.ok) return `${what}: not done (${r?.reason ?? (out.stderr.trim() || `exit ${out.exitCode}`)})`
+  if (r.note) return `${what}: ${r.note}`
+  return r.stopped === undefined ? `${what}: done` : `${what}: ${r.stopped} processes stopped${r.killed ? `, ${r.killed} killed` : ''}`
+}
+
+export const cores = (pct: number): string => `${(Math.max(0, pct) / 100).toFixed(1)} cores`
+
+// Where a run is: its worktree's name, else its last folder.
+export const place = (cwd: string) => /\/\.worktrees\/([^/]+)/.exec(cwd)?.[1] ?? cwd.split('/').filter(Boolean).pop() ?? cwd
+
+export function parseQueueStatus(stdout: string): QueueStatus | undefined {
+  try {
+    const status = JSON.parse(stdout) as QueueStatus
+    const isQueue = (q: QueueStatus['queues'][number]) => typeof q?.name === 'string' && Array.isArray(q.holders) && Array.isArray(q.waiters)
+    return Array.isArray(status?.queues) && status.queues.every(isQueue) && typeof status.machine?.cores === 'number' ? status : undefined
+  } catch {
+    return undefined
+  }
+}
+
+export const queueTotals = (status: QueueStatus) => ({
+  busy: status.queues.reduce((n, q) => n + q.holders.length, 0),
+  slots: status.queues.reduce((n, q) => n + q.slots, 0),
+  waiting: status.queues.reduce((n, q) => n + q.waiters.length, 0),
+})
+
+export function queueHeader(status: QueueStatus): string {
+  const m = status.machine
+  const free = m.memAvailKb === null ? [] : [`${shortMemory(m.memAvailKb)} free`]
+  return [...status.queues.map(q => `${q.name} ${q.holders.length}/${q.slots}`), `load ${Math.round(m.load1)} / ${m.cores} cores`, ...free].join(' · ')
+}
+
+// BRANCH_SCRIPT's five lines: branch, trunk, commits behind trunk, changed files, origin's URL.
 export const BRANCH_SCRIPT =
   'b=$(git rev-parse --abbrev-ref HEAD) || exit 1; t=$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null) || t=origin/main; ' +
-  'echo "$b"; echo "$t"; git rev-list --count "HEAD..$t" 2>/dev/null || echo; git status --porcelain | wc -l'
+  'echo "$b"; echo "$t"; git rev-list --count "HEAD..$t" 2>/dev/null || echo; git status --porcelain | wc -l; git remote get-url origin 2>/dev/null'
 
 export function parseBranch(stdout: string): BranchHealth | undefined {
-  const [branch, trunk, behind, changed] = stdout.split('\n').map(l => l.trim())
+  const [branch, trunk, behind, changed, remote] = stdout.split('\n').map(l => l.trim())
   if (!branch) return undefined
-  return { branch, ...(trunk ? { trunk } : {}), ...(behind ? { behind: Number(behind) } : {}), changed: Number(changed) || 0 }
+  const repo = repoOf(remote)
+  return { branch, ...(trunk ? { trunk } : {}), ...(behind ? { behind: Number(behind) } : {}), changed: Number(changed) || 0, ...(repo ? { repo } : {}) }
 }
