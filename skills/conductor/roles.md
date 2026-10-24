@@ -89,6 +89,8 @@ A lane follows its playbook with these changes:
 - **Questions go up.** Every ask goes to the orchestrator as a Blocked report, after the lane has finished whatever the question does not touch. It never asks the operator directly.
 - **It carries the PR to merge-ready.** The brief is the operator's request to babysit, so after opening-a-pr it runs [babysit](playbooks/babysit.md) in `drive` mode on its own PR, even when the PR sits above another in a stack. For a lane, merge-ready means checks green, no unresolved thread, and only approval and the merge left.
 - **It never merges.** It owns its branch. A conflict or stale base found while babysitting is a Blocked report, not a rebase. A rebase the orchestrator asks for is the lane's to do, and that request allows a force-push with lease to its own branch, followed by a Head moved report.
+- **It hands over when its context is full.** When the binding tells it that its context passed the limit, it finishes the edit in hand and that edit's check, pushes its branch and reports Context full. It starts no new stage first. A fresh lane continues from the report, so the next turns re-read a small context instead of a large one.
+- **It keeps its turns cheap.** It follows [guard-the-context-window](principles/guard-the-context-window.md): one edit per file per change, the diff instead of the file after an edit, and no turn that only narrates.
 - **It fails out loud.** A second FAIL from its verifier, or a second ISSUES from its reviewer on the same premise, is a Failed report.
 
 It reports by ending its turn with the report, or by messaging REPORT TO when the brief sets it, and only at these points. Between them it keeps working. The orchestrator answers by message.
@@ -97,6 +99,7 @@ It reports by ending its turn with the report, or by messaging REPORT TO when th
 - **Head moved.** After merge-ready, any push to its branch, with the new head, so lanes stacked on it can rebase.
 - **Blocked.** The one question it cannot settle, with the options it sees.
 - **Failed.** What it tried, the evidence, and what it would try next.
+- **Context full.** BRANCH and its pushed head, then its work state: what is done, each decision with its reason, what is open, the next step, and the files it touched. The next lane starts from this report alone, so write it for a stranger.
 
 ## Follow-ups
 
