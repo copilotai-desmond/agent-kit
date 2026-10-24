@@ -34,7 +34,7 @@ Babysitting starts when the operator asks, normally once a phase or a whole stac
    - A failure in code the diff never touched suggests a stale base. Check with `git merge-base --is-ancestor origin/<baseRefName> <branch>`, using the base from step 4. If the base is not an ancestor, report a rebase and stop work on that PR's CI. Do not spend reruns on it.
    - A failure in the diff's own code gets a commit, test first. See [fix-root-causes](../principles/fix-root-causes.md).
 
-   Wait with `gh pr checks <pr> --watch`. After every push, re-read the PR and its threads when the watch returns.
+   background `gh pr checks <pr> --watch` and wait for its notice. Never poll. When a check fails, spawn an explorer to read its log and return the failing step, the error and at most 50 lines around it. Read that, not the whole log. After every push, re-read the PR and its threads when the watch returns.
 8. **Stop at merge-ready.** The bottom PR is merge-ready when checks are green, `gh pr view` reports `mergeable` with no blocking state, and no thread is unresolved. A wait for approval is a wait, not a blocker to fix. Babysitting never authorises a merge. Only an explicit request to merge, land or ship does, and that starts [shipping](shipping.md). Surface every escalation and keep working what you can.
 
 **Reply:** the mode you ran, whether the bottom PR is merge-ready (with the PR as a full URL), what you fixed and what you dismissed with one-line reasons, and anything waiting on the operator (sensitive comments, rebases, approvals), in the order and form of SKILL.md "Writing the reply".

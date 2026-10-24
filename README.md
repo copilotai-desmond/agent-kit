@@ -36,6 +36,8 @@ It also suggests a slot count. Set it once per machine in `~/.claude/settings.js
 
 A quarter of your cores is a good start for tests. Without a value each queue runs one command at a time. `CONDUCTOR_QUEUE_MIN_FREE_MB` (default 4096) is the free memory a second slot needs.
 
+`CONDUCTOR_CONTEXT_LIMIT` (default 250000) is the context, in tokens, at which a lane hands over to a fresh lane.
+
 ### 3. Prepare the repo
 
 Conductor reads the repo's own rules first, and they win over its own. It works best when the repo has:

@@ -2,7 +2,7 @@
 
 **When:** A large read, a long output, or work that fans out.
 
-**Why:** A full context degrades reasoning and drops earlier decisions. Raw dumps in your thread cost more than the answer they carry.
+**Why:** A full context degrades reasoning and drops earlier decisions. Raw dumps in your thread cost more than the answer they carry. Every turn re-reads the whole context, so a turn late in a long session costs several times one early in it.
 
 Explorer pointers and the report shape are in roles.md. This adds the rest.
 
@@ -11,5 +11,8 @@ Explorer pointers and the report shape are in roles.md. This adds the rest.
 - Split fan-out into bounded pieces, each with its own scope.
 - Keep decisions and verdicts in the thread. Keep logs and listings out of it.
 - Write long results to a file and cite the path.
+- Plan every change to a file, then make them in one edit. After an edit, read the diff, not the file again.
+- Write one status line when a stage ends. Do not narrate each step. A turn with only text still re-reads the whole context.
+- A delegate hands over when its context passes the limit. The binding says how it learns its size.
 
 **Example.** Finding every caller of a function across a large repo goes to an explorer. It returns twenty `path:line` pointers. You read the five that matter.

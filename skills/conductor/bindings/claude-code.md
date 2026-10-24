@@ -32,6 +32,10 @@ Claude Code has one model family. Spawn reviewers and verifiers fresh at their o
 
 The plugin's mod queues a heavy `Bash` command as `node <plugin>/skills/conductor/tools/queue.mjs run --queue=<q> -- bash -c '<command>'`. It asks the session's permission check about the command as typed and about that queued form. When both are allowed outright (`bypassPermissions`, or rules that allow both), it rewrites the command in place, so type heavy commands plainly and pass `run_in_background: true`. When the typed command is denied, it goes on unchanged and is denied by its own rule. Otherwise the mod denies the call and names the queued form. Run exactly that, with `run_in_background: true`, and the person approves the real queued command. A queued form whose inner command a rule denies is denied too, so allowing `queue.mjs run` allows nothing a rule forbids. In every mode, a foreground heavy command on a full queue is denied with the holders named, so rerun it with `run_in_background: true`. A duplicate of a run already queued or running from the same folder is denied with that run's age and place. Wait for its notice when this session started it. A separate `PreToolUse` hook denies wait loops, so that check holds even where mods do not load.
 
+## The context limit
+
+The plugin's `PostToolUse` hook, `tools/hooks/context-guard.mjs`, reads a delegate's own transcript after each tool call. When the last turn's input passes `CONDUCTOR_CONTEXT_LIMIT` tokens (default 250000), it adds a note that tells the delegate to hand over. It speaks again at each further 50000. It never speaks to the session's own agent, and `CONDUCTOR_HOOKS=off` turns it off. A hook that runs in a delegate gets `agent_id`, and the delegate's transcript is `<session dir>/<session id>/subagents/agent-<agent_id>.jsonl`. The note reaches the delegate as a system reminder. Observed on v2.1.310, 2026-10-24.
+
 ## Repo instruction files
 
 Besides `AGENTS.md`, read `CLAUDE.md` and `.claude/skills/` in the repo.
