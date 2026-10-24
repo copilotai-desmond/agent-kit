@@ -17,4 +17,19 @@
 
 The package's shell hook is the one place this is decided. It also denies a wait loop. A repo with its own queue marks itself managed, as the binding's setup file says, and the hook then only checks for wait loops.
 
+**A repo names its own heavy commands** in `.conductor/queue.json` at its top folder, the one that holds `.git`. The hook reads it on each Bash call, so an edit applies at once. Nothing in this skill changes.
+
+```json
+{
+  "heavy": { "tests": ["pnpm verify", "pnpm checks"], "e2e": ["pnpm e2e:video"] },
+  "light": ["pnpm build:docs"]
+}
+```
+
+- `heavy` maps a queue name to the commands that go in it. `light` lists commands that never queue, even when a built-in rule would queue them.
+- An entry matches by whole words from the start of the command, after the hook drops env assignments and wrappers such as `timeout`, `nice` and `time`. So `pnpm verify` matches `timeout 1800 pnpm verify --all`, and it does not match `pnpm verify:risky`.
+- Within one file, `light` wins. A command no entry names keeps the built-in rules. Help flags and watch modes never queue, whatever the file says.
+- `CONDUCTOR_QUEUE_CONFIG` names a box-wide file with the same shape. The repo's file wins over it.
+- A file that is not valid JSON or has the wrong shape is skipped with one warning, and the built-in rules apply. It never blocks a command.
+
 **Example.** Three verifiers want the e2e suite and the queue has one slot. Spawn one, background its run, and spawn the next when its notice arrives.

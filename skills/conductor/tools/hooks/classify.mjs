@@ -10,6 +10,9 @@ import { waitLoopReason } from "./wait-loop.mjs";
 
 export const BYPASS_ENV = "CONDUCTOR_HOOKS";
 export const MANAGED_ENV = "CONDUCTOR_QUEUE_MANAGED";
+/** The box-wide queue config's path. The repo's own is `REPO_CONFIG` under its top folder. */
+export const CONFIG_ENV = "CONDUCTOR_QUEUE_CONFIG";
+export const REPO_CONFIG = ".conductor/queue.json";
 export const BYPASS_HINT = `If this is a false positive, prefix the command with ${BYPASS_ENV}=off.`;
 
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
@@ -92,6 +95,58 @@ export function commandHead(segment) {
 
 const positional = (args) => args.filter((a) => !a.startsWith("-"));
 const hasFilter = (args) => args.some((a) => a === "--filter" || a === "-F" || a.startsWith("--filter="));
+const QUEUE_NAME = /^[A-Za-z0-9_-]+$/;
+const isCommandList = (v) => Array.isArray(v) && v.every((c) => typeof c === "string" && c.trim() !== "");
+
+/**
+ * A queue config's text as `{ rules }`, each rule `{ words, queue }`, `queue` null for a `light`
+ * entry. Within one file `light` comes first, so it wins. Throws, naming the fault, on a bad file.
+ *
+ *   { "heavy": { "tests": ["pnpm verify"], "e2e": ["pnpm e2e:video"] }, "light": ["pnpm build:docs"] }
+ */
+export function parseQueueConfig(text) {
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error("it is not valid JSON");
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("it must be a JSON object");
+  const words = (command) => command.trim().split(/\s+/);
+  const rules = [];
+  if (raw.light !== undefined) {
+    if (!isCommandList(raw.light)) throw new Error("light must be a list of commands");
+    for (const command of raw.light) rules.push({ words: words(command), queue: null });
+  }
+  if (raw.heavy !== undefined) {
+    if (raw.heavy === null || typeof raw.heavy !== "object" || Array.isArray(raw.heavy)) throw new Error("heavy must map a queue name to a list of commands");
+    for (const [queue, commands] of Object.entries(raw.heavy)) {
+      if (!QUEUE_NAME.test(queue)) throw new Error(`heavy has the queue name ${JSON.stringify(queue)}, which allows only letters, digits, _ and -`);
+      if (!isCommandList(commands)) throw new Error(`heavy.${queue} must be a list of commands`);
+      for (const command of commands) rules.push({ words: words(command), queue });
+    }
+  }
+  return { rules };
+}
+
+/** One config from several, the first given winning: the repo's, then the box's. Null when none is given. */
+export function mergeQueueConfigs(...configs) {
+  const present = configs.filter(Boolean);
+  return present.length ? { rules: present.flatMap((c) => c.rules) } : null;
+}
+
+/** The queue a config names for a head, null for a `light` entry, undefined when no rule names it. A word prefix matches. */
+export function declaredQueue(head, config) {
+  const rule = config?.rules.find((r) => r.words.length <= head.length && r.words.every((w, i) => head[i] === w));
+  return rule === undefined ? undefined : rule.queue;
+}
+
+/** A folder and each folder above it, nearest first; none for a relative path. Pure, so the mod can walk to a repo's top. */
+export function ancestorDirs(dir) {
+  if (typeof dir !== "string" || !dir.startsWith("/")) return [];
+  const parts = dir.split("/").filter(Boolean);
+  return [...parts.map((_, i) => `/${parts.slice(0, parts.length - i).join("/")}`), "/"];
+}
 
 /** A name filter, a source file or a `::` node id narrows a run. A folder does not. */
 const scoped = (args) =>
@@ -115,11 +170,13 @@ const taskQueue = (tasks) => {
  * The queue a head belongs in, "tests" or "e2e", or null when it is not heavy, is scoped or watches.
  * Scoping frees only the tests queue: every e2e run boots a dev server and a browser whatever its scope.
  */
-export function heavyQueue(head) {
+export function heavyQueue(head, config = null) {
   const [tool, ...args] = head;
   if (args.some((a) => INFO_ANYWHERE.has(a)) || isShortInfo(tool, args)) return null;
   // A watch run never exits, so a queued one would hold its slot forever.
   if (neverQueued(tool, args)) return null;
+  const declared = declaredQueue(head, config);
+  if (declared !== undefined) return declared;
   const tests = (heavy) => (heavy ? "tests" : null);
   switch (tool) {
     case "vitest":
@@ -166,13 +223,13 @@ export function heavyQueue(head) {
     case "pnpm":
     case "yarn":
     case "bun":
-      return packageScriptQueue(tool, args);
+      return packageScriptQueue(tool, args, config);
     default:
       return null;
   }
 }
 
-function packageScriptQueue(tool, args) {
+function packageScriptQueue(tool, args, config) {
   if (hasFilter(args)) return null;
   const valueFlags = tool === "npm" ? NPM_VALUE_FLAGS : PM_VALUE_FLAGS;
   const nextWord = (from) => {
@@ -191,7 +248,7 @@ function packageScriptQueue(tool, args) {
     const queue = taskQueue([name]);
     return queue === "e2e" || !scoped(forwarded) ? queue : null;
   }
-  return !isRun && (tool === "pnpm" || tool === "yarn") ? heavyQueue([name, ...forwarded]) : null;
+  return !isRun && (tool === "pnpm" || tool === "yarn") ? heavyQueue([name, ...forwarded], config) : null;
 }
 
 /** Names the queue a `queue.mjs run` segment uses, or null for anything else. */
@@ -212,14 +269,14 @@ const bodiesOf = (segment) => (SHELL.test(commandHead(segment)[0] ?? "") ? shell
  * The first segment that runs a heavy command outside the queue, as { segment, queue, index },
  * or null. A `bash -c '...'` body counts as the segment it sits in; `index` is the outer segment's.
  */
-export function findUnqueuedHeavy(command) {
+export function findUnqueuedHeavy(command, config = null) {
   const segments = commandSegments(command);
   for (const [index, segment] of segments.entries()) {
     if (classifyQueued(segment)) continue;
-    const queue = heavyQueue(commandHead(segment));
+    const queue = heavyQueue(commandHead(segment), config);
     if (queue) return { segment, queue, index };
     for (const body of bodiesOf(segment)) {
-      const inner = findUnqueuedHeavy(body);
+      const inner = findUnqueuedHeavy(body, config);
       if (inner) return { ...inner, index };
     }
   }
@@ -234,12 +291,13 @@ const normalized = (text) => text.replace(REDIRECT, "").replace(/\s+/g, " ").tri
  * dropped and what follows (`| tail -40`) ignored, so two runs that differ only there are one.
  * A `bash -c` body is keyed on itself. Without a heavy segment, the whole command.
  */
-export function dupeKey(command) {
+export function dupeKey(command, config = null) {
   const segments = commandSegments(command);
-  const heavy = findUnqueuedHeavy(command);
+  const heavy = findUnqueuedHeavy(command, config);
   if (!heavy) return normalized(command);
   const last = segments[heavy.index];
-  const head = bodiesOf(last).length && !heavyQueue(commandHead(last)) ? dupeKey(bodiesOf(last).find((b) => findUnqueuedHeavy(b))) : normalized(last);
+  const inner = () => dupeKey(bodiesOf(last).find((b) => findUnqueuedHeavy(b, config)), config);
+  const head = bodiesOf(last).length && !heavyQueue(commandHead(last), config) ? inner() : normalized(last);
   return [...segments.slice(0, heavy.index).map(normalized), head].join(" && ");
 }
 
@@ -333,11 +391,11 @@ export const hasQueued = (command) => commandSegments(command).some((s) => class
 /**
  * What the command text alone decides: `{ pass: true }`, `{ deny }` for a wait loop, or
  * `{ host: true }` when only the queue's state can decide (a heavy or a queued command).
- * `env` needs only `CI` and `CONDUCTOR_HOOKS`.
+ * `env` needs only `CI` and `CONDUCTOR_HOOKS`. `config` is the parsed queue config, or null.
  */
-export function triage(command, background, env) {
+export function triage(command, background, env, config = null) {
   if (typeof command !== "string" || bypassed(command, env, BYPASS_ENV)) return { pass: true };
   const waiting = waitLoopReason(command, background, BYPASS_HINT);
   if (waiting) return { deny: waiting };
-  return findUnqueuedHeavy(command) || hasQueued(command) ? { host: true } : { pass: true };
+  return findUnqueuedHeavy(command, config) || hasQueued(command) ? { host: true } : { pass: true };
 }
