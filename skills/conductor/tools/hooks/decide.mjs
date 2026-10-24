@@ -13,7 +13,8 @@
  *
  * `CONDUCTOR_HOOKS=off` in the environment or the command lets a command through. A repo
  * that runs its own queue sets `CONDUCTOR_QUEUE_MANAGED=1` in its `.claude/settings.json`
- * `env` and gets the wait-loop check only.
+ * `env` and gets the wait-loop check only. A repo that only wants to say which of its commands
+ * are heavy (or light) lists them in `.conductor/queue.json` (`loadQueueConfig`).
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -21,7 +22,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { duplicateNotice, findDuplicate, isDirectInvocation, memoryAdmits, parseRunArgs, queueDir, resolveSlots } from "../queue.mjs";
-import { BYPASS_HINT, classifyQueued, commandHead, findUnqueuedHeavy, MANAGED_ENV, QUEUE_TOKEN, queuedForm, triage } from "./classify.mjs";
+import {
+  BYPASS_HINT,
+  classifyQueued,
+  commandHead,
+  CONFIG_ENV,
+  findUnqueuedHeavy,
+  MANAGED_ENV,
+  mergeQueueConfigs,
+  parseQueueConfig,
+  QUEUE_TOKEN,
+  queuedForm,
+  REPO_CONFIG,
+  triage,
+} from "./classify.mjs";
 import { fullQueueReason, readQueueStatus } from "./full-queue.mjs";
 import { commandSegments } from "./shell.mjs";
 
@@ -39,18 +53,44 @@ export function queuedSlots(segment, env) {
  * The session env is only a fallback outside any repo, because it stays fixed while the session moves between checkouts.
  */
 export function repoManaged(cwd, env) {
-  const fallback = env[MANAGED_ENV] === "1";
-  if (typeof cwd !== "string" || cwd === "") return fallback;
-  let top = path.resolve(cwd);
-  while (!existsSync(path.join(top, ".git"))) {
-    if (path.dirname(top) === top) return fallback;
-    top = path.dirname(top);
-  }
+  const top = repoTop(cwd);
+  if (top === null) return env[MANAGED_ENV] === "1";
   try {
     return JSON.parse(readFileSync(path.join(top, ".claude", "settings.json"), "utf8"))?.env?.[MANAGED_ENV] === "1";
   } catch {
     return false;
   }
+}
+
+/** The top folder of the repo holding `cwd` (the nearest with a `.git`), or null outside any repo. */
+function repoTop(cwd) {
+  if (typeof cwd !== "string" || cwd === "") return null;
+  let top = path.resolve(cwd);
+  while (!existsSync(path.join(top, ".git"))) {
+    if (path.dirname(top) === top) return null;
+    top = path.dirname(top);
+  }
+  return top;
+}
+
+/**
+ * The queue config for a command run in `cwd`: the repo's `.conductor/queue.json`, then the box
+ * file `CONDUCTOR_QUEUE_CONFIG` names, the repo's winning. Null when neither exists. A file that
+ * is named but unreadable or invalid is skipped with one `warn` line, so a typo never blocks work.
+ */
+export function loadQueueConfig(cwd, env, warn) {
+  const read = (file, required) => {
+    if (!required && !existsSync(file)) return null;
+    try {
+      return parseQueueConfig(readFileSync(file, "utf8"));
+    } catch (error) {
+      warn(`conductor: ignoring the queue config ${file}: ${error.code === "ENOENT" ? "it does not exist" : error.message}\n`);
+      return null;
+    }
+  };
+  const top = repoTop(cwd);
+  const boxPath = env[CONFIG_ENV]?.trim();
+  return mergeQueueConfigs(top === null ? null : read(path.join(top, REPO_CONFIG), false), boxPath ? read(boxPath, true) : null);
 }
 
 /** The deny reason for a foreground command whose queues are full, or null. Slot 0 always admits. */
@@ -75,11 +115,15 @@ function fullReason(command, background, env, deps) {
 export function decide(input, env, deps = {}) {
   const command = input?.tool_name === "Bash" ? input.tool_input?.command : null;
   const background = input?.tool_input?.run_in_background;
-  const triaged = triage(command, background, env);
+  let config = null;
+  try {
+    if (typeof command === "string") config = loadQueueConfig(input.cwd, env, deps.warn ?? ((line) => process.stderr.write(line)));
+  } catch {}
+  const triaged = triage(command, background, env, config);
   if (triaged.deny) return { deny: triaged.deny };
   if (triaged.pass || repoManaged(input.cwd, env)) return null;
   try {
-    const heavy = findUnqueuedHeavy(command);
+    const heavy = findUnqueuedHeavy(command, config);
     if (!heavy) {
       const full = fullReason(command, background, env, deps);
       return full ? { deny: full } : null;

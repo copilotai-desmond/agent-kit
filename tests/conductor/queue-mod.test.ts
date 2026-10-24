@@ -298,3 +298,52 @@ describe('the Bash gate', () => {
     expect(w.ran).toEqual(['pytest'])
   })
 })
+
+describe('a declared queue config', () => {
+  /** Files the engine's fs calls see; the session runs in CWD, inside the repo at /w. */
+  function files(on: On, map: Record<string, string>) {
+    on('fs.exists', (_$, e) => ({ value: e.path in map }))
+    on('fs.read', (_$, e) => (map[e.path] === undefined ? { deny: `ENOENT ${e.path}` } : { value: map[e.path] }))
+  }
+  const repo = (config: string) => ({ '/w/.git': '', '/w/.conductor/queue.json': config })
+
+  test("hands a command the repo's config names to decide.mjs", async ($, on) => {
+    const w = harness(on, () => QUEUED_OUT)
+    files(on, repo(JSON.stringify({ heavy: { tests: ['pnpm verify'] } })))
+    await bash($, 'pnpm verify', true)
+    expect(w.helper).toHaveLength(1)
+  })
+
+  test('still passes a light command without starting Node', async ($, on) => {
+    const w = harness(on)
+    files(on, repo(JSON.stringify({ heavy: { tests: ['pnpm verify'] } })))
+    await bash($, 'pnpm lint')
+    expect(w.ran).toEqual(['pnpm lint'])
+    expect(w.helper).toEqual([])
+  })
+
+  test('passes a built-in heavy command the config marks light', async ($, on) => {
+    const w = harness(on)
+    files(on, repo(JSON.stringify({ light: ['pytest'] })))
+    await bash($, 'pytest')
+    expect(w.ran).toEqual(['pytest'])
+    expect(w.helper).toEqual([])
+  })
+
+  test('reads the box file CONDUCTOR_QUEUE_CONFIG names', async ($, on) => {
+    const w = harness(on, () => QUEUED_OUT, { CONDUCTOR_QUEUE_CONFIG: '/box/queue.json' })
+    files(on, { '/box/queue.json': JSON.stringify({ heavy: { tests: ['make docs'] } }) })
+    await bash($, 'make docs', true)
+    expect(w.helper).toHaveLength(1)
+  })
+
+  test('keeps the built-in rules when the config is invalid', async ($, on) => {
+    const w = harness(on, () => QUEUED_OUT)
+    files(on, repo('{nope'))
+    await bash($, 'pnpm verify')
+    expect(w.ran).toEqual(['pnpm verify'])
+    expect(w.helper).toEqual([])
+    await bash($, 'pytest', true)
+    expect(w.helper).toHaveLength(1)
+  })
+})

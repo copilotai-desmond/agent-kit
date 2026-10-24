@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import { each, expect } from "./expect.mjs";
 
-import { commandHead, dupeKey, findUnqueuedHeavy, heavyQueue, queuedBodies, queuedForm, triage, typedQueued } from "../../skills/conductor/tools/hooks/classify.mjs";
+import { ancestorDirs, commandHead, declaredQueue, dupeKey, findUnqueuedHeavy, heavyQueue, mergeQueueConfigs, parseQueueConfig, queuedBodies, queuedForm, triage, typedQueued } from "../../skills/conductor/tools/hooks/classify.mjs";
 
 const queueOf = (command) => heavyQueue(commandHead(command));
 
@@ -124,10 +124,10 @@ describe("heavy command classifier", () => {
     "tsc src/a.ts",
     "gradle test --tests Foo",
     "mvn test -Dtest=Foo",
-    "pnpm --filter web test",
-    "pnpm --filter web test:e2e e2e/x.spec.ts",
     "playwright test --list e2e/x.spec.ts",
     "playwright test --help",
+    "pnpm --filter web test",
+    "pnpm --filter web test:e2e e2e/x.spec.ts",
     "turbo run test --filter=web",
     "pnpm test src/a.test.ts",
     "bundle exec rspec spec/a_spec.rb:12",
@@ -323,4 +323,101 @@ describe("the body a typed queued form runs", () => {
   each(["it's", 'say "hi"', "a; b", "echo $(date) `id`", "a\nb", "a\\'b"])("round-trips %j through its queued form", (command) =>
     expect(queuedBodies(queuedForm(command, "tests", "/p/queue.mjs"))).toEqual([command]),
   );
+});
+
+describe("a declared queue config", () => {
+  const repo = parseQueueConfig(
+    JSON.stringify({ heavy: { tests: ["pnpm verify", "pnpm checks"], e2e: ["pnpm e2e:video"] }, light: ["pnpm test:unit", "pnpm build:docs"] }),
+  );
+  const queueWith = (command, config = repo) => heavyQueue(commandHead(command), config);
+
+  each([
+    ["pnpm verify", "tests"],
+    ["pnpm verify --all", "tests"],
+    ["timeout 1800 pnpm verify", "tests"],
+    ["FOO=1 nice -n 10 pnpm verify", "tests"],
+    ["pnpm checks", "tests"],
+    ["pnpm e2e:video", "e2e"],
+  ])("%s goes to %s", (command, queue) => expect(queueWith(command)).toBe(queue));
+
+  each([
+    // A word prefix, not a text prefix: verify:risky is another script.
+    "pnpm verify:risky",
+    // light wins over the built-in rules.
+    "pnpm test:unit",
+    "pnpm build:docs",
+    // Asking for help or watching still never queues.
+    "pnpm verify --help",
+    "pnpm verify --watch",
+  ])("%s passes", (command) => expect(queueWith(command)).toBeNull());
+
+  it("leaves the built-in rules to everything it does not name", () => {
+    expect(queueWith("pnpm test")).toBe("tests");
+    expect(queueWith("ls")).toBeNull();
+  });
+
+  it("changes nothing without a config", () => {
+    expect(queueWith("pnpm verify", null)).toBeNull();
+    expect(triage("pnpm verify", false, {})).toEqual({ pass: true });
+  });
+
+  it("reaches triage, findUnqueuedHeavy and dupeKey", () => {
+    expect(triage("pnpm verify", false, {}, repo)).toEqual({ host: true });
+    expect(findUnqueuedHeavy("git add -A && pnpm verify | tail -5", repo)).toMatchObject({ queue: "tests", index: 1 });
+    expect(findUnqueuedHeavy("bash -c 'pnpm verify'", repo)?.queue).toBe("tests");
+    expect(dupeKey("cd a && pnpm verify | tail -5", repo)).toBe(dupeKey("cd a && pnpm verify > out.log", repo));
+  });
+
+  it("answers undefined for a head no rule names", () => {
+    expect(declaredQueue(["pnpm", "lint"], repo)).toBeUndefined();
+    expect(declaredQueue(["pnpm", "verify"], null)).toBeUndefined();
+  });
+
+  describe("merging", () => {
+    const box = parseQueueConfig(JSON.stringify({ heavy: { tests: ["make docs"] }, light: ["pnpm checks"] }));
+    const merged = mergeQueueConfigs(repo, box);
+
+    it("keeps what either file declares", () => {
+      expect(queueWith("make docs", merged)).toBe("tests");
+      expect(queueWith("pnpm e2e:video", merged)).toBe("e2e");
+    });
+
+    it("lets the repo file win over the box file", () => {
+      expect(queueWith("pnpm checks", merged)).toBe("tests");
+    });
+
+    it("skips a missing file", () => {
+      expect(mergeQueueConfigs(null, box)).toEqual(box);
+      expect(mergeQueueConfigs(null, undefined)).toBeNull();
+    });
+  });
+
+  describe("parsing", () => {
+    it("reads an empty object as no rules", () => {
+      expect(parseQueueConfig("{}")).toEqual({ rules: [] });
+    });
+
+    each([
+      ["not json", /not valid JSON/],
+      ["[]", /must be a JSON object/],
+      [JSON.stringify({ heavy: ["pnpm verify"] }), /heavy must map a queue name/],
+      [JSON.stringify({ heavy: { "no spaces": ["x"] } }), /queue name/],
+      [JSON.stringify({ heavy: { tests: "pnpm verify" } }), /heavy\.tests must be a list of commands/],
+      [JSON.stringify({ heavy: { tests: [""] } }), /heavy\.tests must be a list of commands/],
+      [JSON.stringify({ light: [1] }), /light must be a list of commands/],
+    ])("refuses %s", (text, message) => {
+      let error;
+      try {
+        parseQueueConfig(text);
+      } catch (e) {
+        error = e;
+      }
+      expect(error?.message ?? "").toMatch(message);
+    });
+  });
+
+  it("lists a folder and every folder above it", () => {
+    expect(ancestorDirs("/w/repo/apps/web/")).toEqual(["/w/repo/apps/web", "/w/repo/apps", "/w/repo", "/w", "/"]);
+    expect(ancestorDirs("relative")).toEqual([]);
+  });
 });

@@ -1,10 +1,52 @@
 // Conductor's queue on Bash calls. The command text is triaged here, in the module; only a heavy
 // or queued command reaches Node, through decide.mjs, which reads the queue. Wait loops are left
 // to the PreToolUse command hook, which holds even where mods do not load.
-import { triage, typedQueued } from "../skills/conductor/tools/hooks/classify.mjs";
+import { ancestorDirs, mergeQueueConfigs, parseQueueConfig, REPO_CONFIG, triage, typedQueued } from "../skills/conductor/tools/hooks/classify.mjs";
 
 /** The setup doctor's probe: only a loaded mod answers it. */
 const PROBE = ": conductor-mod-probe";
+
+/** Bad config files already reported this session, so each is reported once. */
+const warned = new Set();
+
+/**
+ * The queue config for `cwd`, read as decide.mjs reads it but through the engine's file calls,
+ * so a light command still starts no Node. Null on any failure: a config must never block a command.
+ */
+async function queueConfig($, cwd) {
+  const read = async (file, required) => {
+    try {
+      if (!(await $.fs.exists(file))) {
+        if (required && !warned.has(file)) {
+          warned.add(file);
+          $.ui.log(`conductor: ignoring the queue config ${file}: it does not exist`, { to: "debug" });
+        }
+        return null;
+      }
+      return parseQueueConfig(await $.fs.read(file));
+    } catch (error) {
+      if (!warned.has(file)) {
+        warned.add(file);
+        $.ui.log(`conductor: ignoring the queue config ${file}: ${error?.message ?? error}`, { to: "debug" });
+      }
+      return null;
+    }
+  };
+  try {
+    let top = null;
+    for (const dir of ancestorDirs(cwd)) {
+      if (await $.fs.exists(`${dir === "/" ? "" : dir}/.git`)) {
+        top = dir;
+        break;
+      }
+    }
+    // The engine wants a literal name here; it is CONFIG_ENV in classify.mjs.
+    const boxPath = (await $.env.get("CONDUCTOR_QUEUE_CONFIG"))?.trim();
+    return mergeQueueConfigs(top === null ? null : await read(`${top === "/" ? "" : top}/${REPO_CONFIG}`, false), boxPath ? await read(boxPath, true) : null);
+  } catch {
+    return null;
+  }
+}
 
 /** The engine's permission verdict for a command under the session's mode and rules, or null. */
 async function verdict($, command) {
@@ -48,9 +90,9 @@ export const register = (on) => {
     }
     const env = { CI: await $.env.get("CI"), CONDUCTOR_HOOKS: await $.env.get("CONDUCTOR_HOOKS") };
     const background = e.run_in_background === true;
-    const first = triage(e.command, background, env);
-    if (!first.host) return next(e);
     const cwd = await $.session.cwd();
+    const first = triage(e.command, background, env, await queueConfig($, cwd));
+    if (!first.host) return next(e);
     const input = { tool_name: "Bash", tool_input: { command: e.command, run_in_background: background }, cwd, session: await $.session.id() };
     const ran = await $.process.run(["node", `${$.plugin.root}/skills/conductor/tools/hooks/decide.mjs`], {
       cwd,

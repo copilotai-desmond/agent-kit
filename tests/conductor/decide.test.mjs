@@ -7,7 +7,7 @@ import { describe, it } from "node:test";
 import { expect } from "./expect.mjs";
 
 import { BYPASS_HINT, classifyQueued, queuedForm } from "../../skills/conductor/tools/hooks/classify.mjs";
-import { decide, queuedSlots, repoManaged } from "../../skills/conductor/tools/hooks/decide.mjs";
+import { decide, loadQueueConfig, queuedSlots, repoManaged } from "../../skills/conductor/tools/hooks/decide.mjs";
 import { parseRunArgs, processStartTime, resolveSlots } from "../../skills/conductor/tools/queue.mjs";
 
 const QUEUE_MJS = fileURLToPath(new URL("../../skills/conductor/tools/queue.mjs", import.meta.url));
@@ -160,6 +160,66 @@ describe("managed is decided for the repo the command runs in", () => {
     const top = repo();
     mkdirSync(path.join(top, ".claude", "settings.json"), { recursive: true });
     expect(repoManaged(top, { CONDUCTOR_QUEUE_MANAGED: "1" })).toBe(false);
+  });
+});
+
+describe("a repo declares its heavy commands", () => {
+  const repo = (config) => {
+    const top = tmp("repo-");
+    mkdirSync(path.join(top, ".git"));
+    mkdirSync(path.join(top, "pkg"), { recursive: true });
+    if (config !== undefined) {
+      mkdirSync(path.join(top, ".conductor"));
+      writeFileSync(path.join(top, ".conductor", "queue.json"), typeof config === "string" ? config : JSON.stringify(config));
+    }
+    return top;
+  };
+  const boxFile = (config) => {
+    const file = path.join(tmp("box-"), "queue.json");
+    writeFileSync(file, JSON.stringify(config));
+    return file;
+  };
+  const quiet = { warn: () => {} };
+
+  it("queues a command the repo's file names, from any folder inside the repo", () => {
+    const top = repo({ heavy: { tests: ["pnpm verify"] } });
+    const out = decide(bash("timeout 1800 pnpm verify", { run_in_background: true }, path.join(top, "pkg")), box(), quiet);
+    expect(out.command).toMatch(/run --queue=tests -- bash -c 'timeout 1800 pnpm verify'/);
+    expect(out.suggest).toMatch(/^"timeout 1800 pnpm verify" is a heavy command/);
+  });
+
+  it("passes a built-in heavy command the repo's file marks light", () => {
+    expect(decide(bash("pytest", {}, repo({ light: ["pytest"] })), box(), quiet)).toBeNull();
+  });
+
+  it("reads the box file CONDUCTOR_QUEUE_CONFIG names, under the repo's file", () => {
+    const env = box({ CONDUCTOR_QUEUE_CONFIG: boxFile({ heavy: { e2e: ["make docs"] } }) });
+    expect(decide(bash("make docs", {}, repo()), env, quiet)?.command).toMatch(/run --queue=e2e/);
+    expect(decide(bash("make docs", {}, repo({ light: ["make docs"] })), env, quiet)).toBeNull();
+  });
+
+  it("warns once on a bad file and keeps the built-in rules", () => {
+    const lines = [];
+    const top = repo("{nope");
+    const out = decide(bash("pytest", {}, top), box(), { warn: (line) => lines.push(line) });
+    expect(out?.command).toMatch(/run --queue=tests/);
+    expect(decide(bash("pnpm verify", {}, top), box(), quiet)).toBeNull();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/conductor: ignoring .*\.conductor\/queue\.json: it is not valid JSON/);
+  });
+
+  it("warns on a box file that is missing and ignores a blank variable", () => {
+    const lines = [];
+    const warn = (line) => lines.push(line);
+    expect(loadQueueConfig(repo(), { CONDUCTOR_QUEUE_CONFIG: "  " }, warn)).toBeNull();
+    expect(lines).toEqual([]);
+    expect(loadQueueConfig(repo(), { CONDUCTOR_QUEUE_CONFIG: "/nowhere/queue.json" }, warn)).toBeNull();
+    expect(lines[0]).toMatch(/\/nowhere\/queue\.json/);
+  });
+
+  it("finds no repo file outside a repo or without a working directory", () => {
+    expect(loadQueueConfig(undefined, {}, quiet.warn)).toBeNull();
+    expect(loadQueueConfig(tmp("bare-"), {}, quiet.warn)).toBeNull();
   });
 });
 
